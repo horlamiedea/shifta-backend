@@ -1,0 +1,188 @@
+from django.db import transaction
+from core.services import BaseService
+from .models import Shift, ShiftApplication
+from .tasks import notify_matching_professionals
+from decimal import Decimal
+
+class ShiftCreateService(BaseService):
+    @transaction.atomic
+    def __call__(self, user, role, specialty, quantity_needed, start_time, end_time, rate):
+        if not user.is_facility:
+            raise PermissionError("Only facilities can create shifts.")
+        
+        facility = user.facility
+        
+        # Cost Calculation & Deduction (Phase 2)
+        # Duration in hours
+        duration = (end_time - start_time).total_seconds() / 3600
+        if duration <= 0:
+             raise ValueError("End time must be after start time.")
+             
+        # Rate is per hour per professional (as per user requirement: "put the amount for one hour... price will be 30*8")
+        # So total_cost = rate * duration * quantity
+        total_cost = rate *  Decimal(duration) * quantity_needed
+        
+        # Check Wallet Balance
+        if facility.wallet_balance < total_cost:
+             raise ValueError(f"Insufficient wallet balance. Required: {total_cost}, Available: {facility.wallet_balance}")
+        
+        # Deduct from Wallet
+        facility.wallet_balance -= total_cost
+        facility.save()
+        
+        shift = Shift.objects.create(
+            facility=facility,
+            role=role,
+            specialty=specialty,
+            quantity_needed=quantity_needed,
+            quantity_filled=0,
+            start_time=start_time,
+            end_time=end_time,
+            rate=rate # Storing hourly rate
+        )
+        
+        # Trigger notification task
+        notify_matching_professionals.delay(shift.id)
+        
+        return shift
+
+class ShiftApplyService(BaseService):
+    def __call__(self, user, shift_id):
+        if not user.is_professional:
+            raise PermissionError("Only professionals can apply.")
+            
+        shift = Shift.objects.get(id=shift_id)
+        if shift.status != 'OPEN':
+            raise ValueError("Shift is not open.")
+            
+        if ShiftApplication.objects.filter(shift=shift, professional=user.professional).exists():
+            raise ValueError("Already applied.")
+            
+        # Clash Prevention (Phase 4)
+        # Check for any CONFIRMED or IN_PROGRESS application that overlaps with this shift's time
+        clashing_apps = ShiftApplication.objects.filter(
+            professional=user.professional,
+            status__in=['CONFIRMED', 'IN_PROGRESS', 'ATTENDANCE_PENDING'],
+            shift__start_time__lt=shift.end_time,
+            shift__end_time__gt=shift.start_time
+        )
+        
+        if clashing_apps.exists():
+            raise ValueError("This shift clashes with another shift you have accepted.")
+            
+        application = ShiftApplication.objects.create(
+            shift=shift,
+            professional=user.professional
+        )
+        return application
+
+class ShiftManageApplicationService(BaseService):
+    @transaction.atomic
+    def __call__(self, user, application_id, action):
+        if not user.is_facility:
+            raise PermissionError("Only facilities can manage applications.")
+            
+        application = ShiftApplication.objects.get(id=application_id)
+        if application.shift.facility != user.facility:
+            raise PermissionError("Not your shift.")
+            
+        if action == 'CONFIRM':
+            if application.shift.quantity_filled >= application.shift.quantity_needed:
+                raise ValueError("Shift is already filled.")
+                
+            application.status = 'CONFIRMED'
+            application.save()
+            
+            # Update shift filled count
+            shift = application.shift
+            shift.quantity_filled += 1
+            if shift.quantity_filled >= shift.quantity_needed:
+                shift.status = 'FILLED'
+            shift.save()
+            
+        elif action == 'REJECT':
+            application.status = 'REJECTED'
+            application.save()
+            
+        return application
+
+class ClockInService(BaseService):
+    def __call__(self, user, shift_id, lat, lng, qr_code_data):
+        # 1. Verify User is Professional
+        if not user.is_professional:
+            raise PermissionError("Only professionals can clock in.")
+            
+        # 2. Get Application
+        try:
+            application = ShiftApplication.objects.get(shift__id=shift_id, professional=user.professional, status='CONFIRMED')
+        except ShiftApplication.DoesNotExist:
+            raise ValueError("No confirmed application for this shift.")
+            
+        # 3. Verify QR Code (Simple check: qr_code_data == facility_id or similar)
+        # PRD: "unique QR/Barcode for my facility"
+        if qr_code_data != str(application.shift.facility.id):
+             raise ValueError("Invalid Facility QR Code.")
+          # 4. Geo-fencing Check
+        # Use Shift location if available, else Facility location
+        from core.utils import haversine
+        facility = application.shift.facility # Get facility once
+        target_lat = application.shift.latitude or facility.location_lat
+        target_lng = application.shift.longitude or facility.location_lng
+        
+        if target_lat is None or target_lng is None:
+             # If no location set, maybe skip check or enforce facility to set it?
+             # For now, let's assume location is mandatory or skip if missing.
+             pass
+        else:
+            distance = haversine(lat, lng, target_lat, target_lng)
+            if distance > 2.0: # 2km radius as per Phase 3 requirement
+                raise ValueError(f"You are too far from the shift location. Distance: {distance:.2f}km")
+        
+        # 5. Clock In
+        from django.utils import timezone
+        application.clock_in_time = timezone.now()
+        application.status = 'ATTENDANCE_PENDING' # Phase 3: Needs approval
+        application.save()
+        
+        # 6. Notify Facility
+        from core.models import Notification
+        Notification.objects.create(
+            user=facility.user,
+            title="Shift Start Request",
+            message=f"{user.email} has started the shift '{application.shift.role}'. Please approve.",
+            notification_type="SHIFT_START",
+            related_object_id=application.id
+        )
+        
+        return application
+
+class ClockOutService(BaseService):
+    def __call__(self, user, shift_id, lat, lng, qr_code_data):
+        # Similar checks...
+        if not user.is_professional:
+            raise PermissionError("Only professionals can clock out.")
+            
+        try:
+            application = ShiftApplication.objects.get(shift__id=shift_id, professional=user.professional, status='CONFIRMED')
+        except ShiftApplication.DoesNotExist:
+            raise ValueError("No confirmed application for this shift.")
+            
+        if qr_code_data != str(application.shift.facility.id):
+             raise ValueError("Invalid Facility QR Code.")
+             
+        from core.utils import haversine
+        distance = haversine(lat, lng, application.shift.facility.location_lat, application.shift.facility.location_lng)
+        if distance > 0.5:
+            raise ValueError("You must be at the facility to clock out.")
+            
+        from django.utils import timezone
+        application.clock_out_time = timezone.now()
+        application.save()
+        
+        # Trigger Payment (Epic 6)
+        from billing.tasks import payout_professional
+        # Schedule for 24 hours later as per PRD
+        payout_professional.apply_async((application.id,), countdown=24*3600)
+        
+        return application
+
