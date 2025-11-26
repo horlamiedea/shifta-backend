@@ -426,3 +426,108 @@ class FacilityStaffListView(APIView):
         
         return Response(data)
 
+@extend_schema(
+    request=inline_serializer(
+        name='FacilityStaffCreateRequest',
+        fields={
+            'email': serializers.EmailField(),
+            'password': serializers.CharField(),
+            'role': serializers.ChoiceField(choices=['ADMIN', 'MANAGER', 'STAFF']),
+            'permissions': inline_serializer(
+                name='StaffPermissionsCreate',
+                fields={
+                    'can_create_shifts': serializers.BooleanField(required=False),
+                    'can_manage_staff': serializers.BooleanField(required=False),
+                    'can_view_financials': serializers.BooleanField(required=False)
+                }
+            )
+        }
+    ),
+    responses={
+        201: inline_serializer(
+            name='FacilityStaffCreateResponse',
+            fields={'status': serializers.CharField(), 'staff_id': serializers.CharField()}
+        ),
+        400: inline_serializer(name='StaffCreateError', fields={'error': serializers.CharField()}),
+        403: inline_serializer(name='StaffCreatePermissionError', fields={'error': serializers.CharField()})
+    }
+)
+@route("facility/staff/create/", name="facility-staff-create")
+class FacilityStaffCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.is_facility:
+            # Check if it's a staff member with permissions
+            if hasattr(request.user, 'facility_staff_profile') and request.user.facility_staff_profile.can_manage_staff:
+                facility = request.user.facility_staff_profile.facility
+            else:
+                return Response({"error": "Permission denied"}, status=403)
+        else:
+            facility = request.user.facility
+
+        email = request.data.get("email")
+        password = request.data.get("password")
+        role = request.data.get("role")
+        permissions = request.data.get("permissions", {})
+        
+        from .services import FacilityStaffService
+        service = FacilityStaffService()
+        try:
+            staff = service.create_staff(facility, email, password, role, permissions)
+            return Response({"status": "created", "staff_id": str(staff.id)}, status=201)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+
+@extend_schema(
+    request=inline_serializer(
+        name='FacilityStaffUpdateRequest',
+        fields={
+            'role': serializers.ChoiceField(choices=['ADMIN', 'MANAGER', 'STAFF'], required=False),
+            'permissions': inline_serializer(
+                name='StaffPermissionsUpdate',
+                fields={
+                    'can_create_shifts': serializers.BooleanField(required=False),
+                    'can_manage_staff': serializers.BooleanField(required=False),
+                    'can_view_financials': serializers.BooleanField(required=False)
+                }
+            )
+        }
+    ),
+    responses={
+        200: inline_serializer(
+            name='FacilityStaffUpdateResponse',
+            fields={'status': serializers.CharField()}
+        ),
+        400: inline_serializer(name='StaffUpdateError', fields={'error': serializers.CharField()}),
+        403: inline_serializer(name='StaffUpdatePermissionError', fields={'error': serializers.CharField()})
+    }
+)
+@route("facility/staff/<uuid:staff_id>/update/", name="facility-staff-update")
+class FacilityStaffUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request, staff_id):
+        if not request.user.is_facility:
+             if hasattr(request.user, 'facility_staff_profile') and request.user.facility_staff_profile.can_manage_staff:
+                facility = request.user.facility_staff_profile.facility
+             else:
+                return Response({"error": "Permission denied"}, status=403)
+        else:
+            facility = request.user.facility
+            
+        from .models import FacilityStaff
+        try:
+            staff = FacilityStaff.objects.get(id=staff_id, facility=facility)
+        except FacilityStaff.DoesNotExist:
+            return Response({"error": "Staff member not found"}, status=404)
+            
+        role = request.data.get("role")
+        permissions = request.data.get("permissions")
+        
+        from .services import FacilityStaffService
+        service = FacilityStaffService()
+        service.update_staff(staff, role, permissions)
+        
+        return Response({"status": "updated"})
+

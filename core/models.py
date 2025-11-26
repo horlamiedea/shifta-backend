@@ -10,12 +10,25 @@ class BaseModel(models.Model):
         abstract = True
 
 class Notification(BaseModel):
+    NOTIFICATION_TYPES = (
+        ('SHIFT_POSTED', 'Shift Posted'),
+        ('SHIFT_APPROVED', 'Shift Approved'),
+        ('REMINDER', 'Reminder'),
+        ('CANCELLED', 'Shift Cancelled'),
+        ('BOOKED', 'Shift Booked'),
+        ('MESSAGE', 'New Message'),
+        ('INVOICE_UPCOMING', 'Invoice Upcoming'),
+        ('INVOICE_GENERATED', 'Invoice Generated'),
+        ('BROADCAST', 'Broadcast'),
+    )
+
     user = models.ForeignKey('accounts.User', on_delete=models.CASCADE, related_name='notifications')
     title = models.CharField(max_length=255)
     message = models.TextField()
-    notification_type = models.CharField(max_length=50) # e.g., 'SHIFT_START', 'SHIFT_APPLICATION'
+    notification_type = models.CharField(max_length=50, choices=NOTIFICATION_TYPES)
     is_read = models.BooleanField(default=False)
     related_object_id = models.UUIDField(null=True, blank=True) # Generic link to related object
+    data = models.JSONField(default=dict, blank=True) # For extra context
     
     def __str__(self):
         return f"{self.title} - {self.user.email}"

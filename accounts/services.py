@@ -81,4 +81,39 @@ class ProfessionalUpdateService(BaseService):
             verify_professional_certificate.delay(professional.id)
             
         professional.save()
+        professional.save()
         return professional
+
+from .models import FacilityStaff
+
+class FacilityStaffService(BaseService):
+    @transaction.atomic
+    def create_staff(self, facility, email, password, role, permissions):
+        # Check if user exists
+        user = User.objects.filter(email=email).first()
+        if not user:
+            user = User.objects.create_user(email=email, password=password)
+        
+        # Check if already staff
+        if FacilityStaff.objects.filter(facility=facility, user=user).exists():
+            raise ValueError("User is already a staff member of this facility.")
+            
+        staff = FacilityStaff.objects.create(
+            facility=facility,
+            user=user,
+            role=role,
+            can_create_shifts=permissions.get('can_create_shifts', False),
+            can_manage_staff=permissions.get('can_manage_staff', False),
+            can_view_financials=permissions.get('can_view_financials', False)
+        )
+        return staff
+
+    def update_staff(self, staff, role=None, permissions=None):
+        if role:
+            staff.role = role
+        if permissions:
+            staff.can_create_shifts = permissions.get('can_create_shifts', staff.can_create_shifts)
+            staff.can_manage_staff = permissions.get('can_manage_staff', staff.can_manage_staff)
+            staff.can_view_financials = permissions.get('can_view_financials', staff.can_view_financials)
+        staff.save()
+        return staff

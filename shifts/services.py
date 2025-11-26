@@ -197,3 +197,101 @@ class ClockOutService(BaseService):
         
         return application
 
+from .models import ExtraTimeRequest
+from django.utils import timezone
+
+class ExtraTimeService(BaseService):
+    def request_extra_time(self, user, shift_application_id, hours, reason):
+        if not user.is_professional:
+             raise PermissionError("Only professionals can request extra time.")
+             
+        application = ShiftApplication.objects.get(id=shift_application_id)
+        if application.professional.user != user:
+            raise PermissionError("Not your shift application.")
+            
+        request = ExtraTimeRequest.objects.create(
+            shift_application=application,
+            hours=hours,
+            reason=reason,
+            status='PENDING',
+            requested_by=user
+        )
+        
+        # Notify Facility
+        from core.models import Notification
+        Notification.objects.create(
+            user=application.shift.facility.user,
+            title="Extra Time Request",
+            message=f"{user.email} requested {hours}hrs extra time for '{application.shift.role}'.",
+            notification_type="REMINDER", # Using REMINDER as generic for now, or add EXTRA_TIME_REQUEST type
+            data={"request_id": str(request.id)}
+        )
+        
+        return request
+
+    def add_extra_time(self, user, shift_application_id, hours, reason):
+        if not user.is_facility:
+             # Check staff permissions
+             if hasattr(user, 'facility_staff_profile') and user.facility_staff_profile.can_create_shifts: # Reuse create permission?
+                 facility = user.facility_staff_profile.facility
+             else:
+                 raise PermissionError("Permission denied.")
+        else:
+            facility = user.facility
+            
+        application = ShiftApplication.objects.get(id=shift_application_id)
+        if application.shift.facility != facility:
+            raise PermissionError("Not your shift.")
+            
+        request = ExtraTimeRequest.objects.create(
+            shift_application=application,
+            hours=hours,
+            reason=reason,
+            status='APPROVED',
+            requested_by=user,
+            approved_by=user,
+            approved_at=timezone.now()
+        )
+        
+        # Notify Professional
+        from core.models import Notification
+        Notification.objects.create(
+            user=application.professional.user,
+            title="Extra Time Added",
+            message=f"{facility.name} added {hours}hrs extra time to your shift.",
+            notification_type="SHIFT_APPROVED", # Reusing type
+            data={"request_id": str(request.id)}
+        )
+        
+        return request
+
+    def approve_extra_time(self, user, request_id):
+        if not user.is_facility:
+             if hasattr(user, 'facility_staff_profile') and user.facility_staff_profile.can_create_shifts:
+                 facility = user.facility_staff_profile.facility
+             else:
+                 raise PermissionError("Permission denied.")
+        else:
+            facility = user.facility
+            
+        request = ExtraTimeRequest.objects.get(id=request_id)
+        if request.shift_application.shift.facility != facility:
+            raise PermissionError("Not your shift.")
+            
+        request.status = 'APPROVED'
+        request.approved_by = user
+        request.approved_at = timezone.now()
+        request.save()
+        
+        # Notify Professional
+        from core.models import Notification
+        Notification.objects.create(
+            user=request.shift_application.professional.user,
+            title="Extra Time Approved",
+            message=f"Your request for {request.hours}hrs extra time has been approved.",
+            notification_type="SHIFT_APPROVED",
+            data={"request_id": str(request.id)}
+        )
+        
+        return request
+

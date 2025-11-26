@@ -48,3 +48,16 @@ class SendBroadcastService(BaseService):
             count += 1
             
         return {"status": "success", "recipients_count": count}
+
+class NotificationService(BaseService):
+    def send_notification(self, recipient, notification_type, title, message, data=None):
+        """
+        Send a notification to a user.
+        """
+        return Notification.objects.create(
+            user=recipient,
+            notification_type=notification_type,
+            title=title,
+            message=message,
+            data=data or {}
+        )

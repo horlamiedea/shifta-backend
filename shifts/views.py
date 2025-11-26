@@ -2,7 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from core.router import route
-from .services import ShiftCreateService, ShiftApplyService, ShiftManageApplicationService, ClockInService, ClockOutService
+from .services import ShiftCreateService, ShiftApplyService, ShiftManageApplicationService, ClockInService, ClockOutService, ExtraTimeService
 from .cancellation_services import FacilityCancelShiftService, ProfessionalCancelShiftService
 from .approval_services import ApproveShiftStartService
 from .selectors import ShiftSelector
@@ -414,3 +414,166 @@ class ProfessionalShiftListView(APIView):
 
 
 
+
+@extend_schema(
+    request=inline_serializer(
+        name='ExtraTimeRequestData',
+        fields={
+            'shift_application_id': serializers.IntegerField(),
+            'hours': serializers.DecimalField(max_digits=4, decimal_places=2),
+            'reason': serializers.CharField(),
+        }
+    ),
+    responses={
+        201: inline_serializer(name='ExtraTimeResponse', fields={'status': serializers.CharField(), 'request_id': serializers.UUIDField()}),
+        400: inline_serializer(name='ExtraTimeError', fields={'error': serializers.CharField()})
+    }
+)
+@route("shifts/extra-time/request/", name="extra-time-request")
+class ExtraTimeRequestView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        service = ExtraTimeService()
+        try:
+            req = service.request_extra_time(
+                user=request.user,
+                shift_application_id=request.data.get("shift_application_id"),
+                hours=request.data.get("hours"),
+                reason=request.data.get("reason")
+            )
+            return Response({"status": "requested", "request_id": req.id}, status=201)
+        except Exception as e:
+            return Response({"error": str(e)}, status=400)
+
+@extend_schema(
+    request=inline_serializer(
+        name='ExtraTimeAddData',
+        fields={
+            'shift_application_id': serializers.IntegerField(),
+            'hours': serializers.DecimalField(max_digits=4, decimal_places=2),
+            'reason': serializers.CharField(),
+        }
+    ),
+    responses={
+        201: inline_serializer(name='ExtraTimeAddResponse', fields={'status': serializers.CharField(), 'request_id': serializers.UUIDField()}),
+        400: inline_serializer(name='ExtraTimeAddError', fields={'error': serializers.CharField()})
+    }
+)
+@route("shifts/extra-time/add/", name="extra-time-add")
+class ExtraTimeAddView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        service = ExtraTimeService()
+        try:
+            req = service.add_extra_time(
+                user=request.user,
+                shift_application_id=request.data.get("shift_application_id"),
+                hours=request.data.get("hours"),
+                reason=request.data.get("reason")
+            )
+            return Response({"status": "added", "request_id": req.id}, status=201)
+        except Exception as e:
+            return Response({"error": str(e)}, status=400)
+
+@extend_schema(
+    request=inline_serializer(
+        name='ExtraTimeApproveData',
+        fields={
+            'request_id': serializers.UUIDField(),
+        }
+    ),
+    responses={
+        200: inline_serializer(name='ExtraTimeApproveResponse', fields={'status': serializers.CharField()}),
+        400: inline_serializer(name='ExtraTimeApproveError', fields={'error': serializers.CharField()})
+    }
+)
+@route("shifts/extra-time/approve/", name="extra-time-approve")
+class ExtraTimeApproveView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        service = ExtraTimeService()
+        try:
+            service.approve_extra_time(
+                user=request.user,
+                request_id=request.data.get("request_id")
+            )
+            return Response({"status": "approved"})
+        except Exception as e:
+            return Response({"error": str(e)}, status=400)
+
+@extend_schema(
+    parameters=[
+        OpenApiParameter(name='date_start', description='Start date (YYYY-MM-DD)', required=True, type=OpenApiTypes.DATE),
+        OpenApiParameter(name='date_end', description='End date (YYYY-MM-DD)', required=True, type=OpenApiTypes.DATE),
+        OpenApiParameter(name='applicant_id', description='Filter by applicant ID', required=False, type=str),
+    ],
+    responses={
+        200: inline_serializer(
+            name='CalendarShiftResponse',
+            many=True,
+            fields={
+                'id': serializers.UUIDField(),
+                'role': serializers.CharField(),
+                'start_time': serializers.DateTimeField(),
+                'end_time': serializers.DateTimeField(),
+                'status': serializers.CharField(),
+                'professionals': inline_serializer(
+                    name='CalendarProfessional',
+                    many=True,
+                    fields={
+                        'id': serializers.UUIDField(),
+                        'name': serializers.CharField(),
+                        'status': serializers.CharField()
+                    }
+                )
+            }
+        ),
+        403: inline_serializer(name='CalendarPermissionError', fields={'error': serializers.CharField()})
+    }
+)
+@route("shifts/calendar/", name="shift-calendar")
+class CalendarViewSet(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.is_facility:
+            if hasattr(request.user, 'facility_staff_profile'):
+                 facility = request.user.facility_staff_profile.facility
+            else:
+                return Response({"error": "Only facilities can view calendar"}, status=403)
+        else:
+            facility = request.user.facility
+            
+        date_start = request.query_params.get("date_start")
+        date_end = request.query_params.get("date_end")
+        applicant_id = request.query_params.get("applicant_id")
+        
+        if not date_start or not date_end:
+            return Response({"error": "date_start and date_end are required"}, status=400)
+            
+        selector = ShiftSelector()
+        shifts = selector.list_calendar_shifts(facility, date_start, date_end, applicant_id)
+        
+        data = []
+        for shift in shifts:
+            # Get confirmed professionals for this shift
+            apps = shift.applications.filter(status__in=['CONFIRMED', 'IN_PROGRESS', 'ATTENDANCE_PENDING', 'COMPLETED'])
+            professionals = [{
+                "id": app.professional.id,
+                "name": app.professional.user.email, # Or full name if available
+                "status": app.status
+            } for app in apps]
+            
+            data.append({
+                "id": shift.id,
+                "role": shift.role,
+                "start_time": shift.start_time,
+                "end_time": shift.end_time,
+                "status": shift.status,
+                "professionals": professionals
+            })
+            
+        return Response(data)

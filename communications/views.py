@@ -100,3 +100,60 @@ class ChatHistoryView(APIView):
             "timestamp": m.created_at
         } for m in messages]
         return Response(data)
+
+from core.models import Notification
+
+@extend_schema(
+    responses={
+        200: inline_serializer(
+            name='NotificationListResponse',
+            many=True,
+            fields={
+                'id': serializers.UUIDField(),
+                'title': serializers.CharField(),
+                'message': serializers.CharField(),
+                'notification_type': serializers.CharField(),
+                'is_read': serializers.BooleanField(),
+                'created_at': serializers.DateTimeField(),
+                'data': serializers.JSONField()
+            }
+        )
+    }
+)
+@route("notifications/", name="notifications-list")
+class NotificationListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        notifications = Notification.objects.filter(user=request.user).order_by('-created_at')
+        data = [{
+            "id": n.id,
+            "title": n.title,
+            "message": n.message,
+            "notification_type": n.notification_type,
+            "is_read": n.is_read,
+            "created_at": n.created_at,
+            "data": n.data
+        } for n in notifications]
+        return Response(data)
+
+@extend_schema(
+    responses={
+        200: inline_serializer(
+            name='NotificationMarkReadResponse',
+            fields={'status': serializers.CharField()}
+        )
+    }
+)
+@route("notifications/<uuid:notification_id>/read/", name="notification-mark-read")
+class NotificationMarkReadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, notification_id):
+        try:
+            notification = Notification.objects.get(id=notification_id, user=request.user)
+            notification.is_read = True
+            notification.save()
+            return Response({"status": "success"})
+        except Notification.DoesNotExist:
+            return Response({"error": "Notification not found"}, status=404)
