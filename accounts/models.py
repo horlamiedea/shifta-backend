@@ -111,6 +111,9 @@ class WaitlistProfessional(BaseModel):
     location = models.CharField(max_length=255, null=True, blank=True)
     preferred_work_address = models.TextField(null=True, blank=True)
     shift_rate_9hr = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    shift_rate_12hr = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    shift_rate_16hr = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    shift_rate_24hr = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     years_of_experience = models.IntegerField(null=True, blank=True)
     bio_data = models.TextField(null=True, blank=True) # Any other details
     

@@ -265,6 +265,9 @@ class AdminVerifyProfessionalView(APIView):
             'location': serializers.CharField(required=False),
             'preferred_work_address': serializers.CharField(required=False),
             'shift_rate_9hr': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
+            'shift_rate_12hr': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
+            'shift_rate_16hr': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
+            'shift_rate_24hr': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
             'years_of_experience': serializers.IntegerField(required=False),
             'cv_file': serializers.FileField(required=False),
             'license_file': serializers.FileField(required=False),
@@ -304,6 +307,9 @@ class WaitlistCreateView(APIView):
         location = request.data.get("location")
         preferred_work_address = request.data.get("preferred_work_address")
         shift_rate_9hr = request.data.get("shift_rate_9hr")
+        shift_rate_12hr = request.data.get("shift_rate_12hr")
+        shift_rate_16hr = request.data.get("shift_rate_16hr")
+        shift_rate_24hr = request.data.get("shift_rate_24hr")
         years_of_experience = request.data.get("years_of_experience")
         
         cv_file = request.FILES.get("cv_file")
@@ -324,6 +330,9 @@ class WaitlistCreateView(APIView):
             location=location,
             preferred_work_address=preferred_work_address,
             shift_rate_9hr=shift_rate_9hr,
+            shift_rate_12hr=shift_rate_12hr,
+            shift_rate_16hr=shift_rate_16hr,
+            shift_rate_24hr=shift_rate_24hr,
             years_of_experience=years_of_experience,
             cv_file=cv_file,
             license_file=license_file
