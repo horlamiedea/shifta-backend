@@ -24,7 +24,7 @@ SECRET_KEY = "django-insecure-t7i^fltw=fd6=sq4%$c+)2d8_=bst-m4-n15#^#4w9^v9-^6%5
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ["urahealth.westus2.cloudapp.azure.com", "localhost", "127.0.0.1"]
+ALLOWED_HOSTS = ["urahealth.westus2.cloudapp.azure.com", "localhost", "127.0.0.1", "172.203.248.172"]
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
