@@ -1,0 +1,64 @@
+### Shifta API - Communications & Notifications Endpoints
+### Use with REST Client extension in VS Code or any HTTP client
+
+@baseUrl = http://localhost:8000/api/v1
+@contentType = application/json
+
+### ============================================
+### IMPORTANT: First login to get tokens
+### Run the login requests in auth.http first
+### Then copy the token here
+### ============================================
+@facilityToken = YOUR_FACILITY_TOKEN_HERE
+@professionalToken = YOUR_PROFESSIONAL_TOKEN_HERE
+
+### ============================================
+### NOTIFICATIONS
+### ============================================
+
+### GET ALL NOTIFICATIONS
+GET {{baseUrl}}/notifications/
+Authorization: Token {{facilityToken}}
+
+### GET NOTIFICATIONS - Professional
+GET {{baseUrl}}/notifications/
+Authorization: Token {{professionalToken}}
+
+### MARK NOTIFICATION AS READ
+@notificationId = REPLACE_WITH_NOTIFICATION_UUID
+POST {{baseUrl}}/notifications/{{notificationId}}/read/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### CHAT
+### ============================================
+
+### CREATE OR GET CHAT ROOM
+### Creates a chat room for a shift application
+@applicationId = 1
+POST {{baseUrl}}/chat/rooms/
+Authorization: Token {{facilityToken}}
+Content-Type: {{contentType}}
+
+{
+    "application_id": {{applicationId}}
+}
+
+### GET CHAT HISTORY
+@roomId = 1
+GET {{baseUrl}}/chat/rooms/{{roomId}}/messages/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### BROADCAST MESSAGE
+### Send message to all confirmed professionals for a shift
+### ============================================
+@shiftId = REPLACE_WITH_SHIFT_UUID
+POST {{baseUrl}}/communications/broadcast/
+Authorization: Token {{facilityToken}}
+Content-Type: {{contentType}}
+
+{
+    "shift_id": "{{shiftId}}",
+    "message": "Reminder: Please arrive 15 minutes early for your shift tomorrow."
+}

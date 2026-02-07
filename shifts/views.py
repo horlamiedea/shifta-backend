@@ -45,7 +45,10 @@ class ShiftListCreateView(APIView):
             "role": s.role,
             "specialty": s.specialty,
             "start_time": s.start_time,
-            "rate": s.rate
+            "rate": s.rate,
+            "address": s.address,
+            "latitude": s.latitude,
+            "longitude": s.longitude
         } for s in shifts]
         
         return Response(data)
@@ -62,6 +65,9 @@ class ShiftListCreateView(APIView):
                 'rate': serializers.DecimalField(max_digits=10, decimal_places=2),
                 'is_negotiable': serializers.BooleanField(required=False),
                 'min_rate': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
+                'address': serializers.CharField(required=False, help_text='Optional shift address. If not provided, uses facility address.'),
+                'latitude': serializers.FloatField(required=False, help_text='Optional latitude. If not provided, geocoded from address.'),
+                'longitude': serializers.FloatField(required=False, help_text='Optional longitude. If not provided, geocoded from address.'),
             }
         ),
         responses={
@@ -69,7 +75,10 @@ class ShiftListCreateView(APIView):
                 name='ShiftCreateResponse',
                 fields={
                     'id': serializers.UUIDField(),
-                    'status': serializers.CharField()
+                    'status': serializers.CharField(),
+                    'address': serializers.CharField(allow_null=True),
+                    'latitude': serializers.FloatField(allow_null=True),
+                    'longitude': serializers.FloatField(allow_null=True),
                 }
             ),
             403: inline_serializer(name='ShiftCreatePermissionError', fields={'error': serializers.CharField()}),
@@ -88,12 +97,119 @@ class ShiftListCreateView(APIView):
                 end_time=request.data.get("end_time"),
                 rate=request.data.get("rate"),
                 is_negotiable=request.data.get("is_negotiable", False),
-                min_rate=request.data.get("min_rate")
+                min_rate=request.data.get("min_rate"),
+                address=request.data.get("address"),
+                latitude=request.data.get("latitude"),
+                longitude=request.data.get("longitude")
             )
-            return Response({"id": shift.id, "status": "created"}, status=201)
+            return Response({
+                "id": shift.id, 
+                "status": "created",
+                "address": shift.address,
+                "latitude": shift.latitude,
+                "longitude": shift.longitude
+            }, status=201)
         except PermissionError as e:
             return Response({"error": str(e)}, status=403)
         except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+
+@extend_schema(
+    responses={
+        200: inline_serializer(
+            name='ShiftDetailResponse',
+            fields={
+                'id': serializers.UUIDField(),
+                'facility': serializers.CharField(),
+                'role': serializers.CharField(),
+                'specialty': serializers.CharField(),
+                'quantity_needed': serializers.IntegerField(),
+                'quantity_filled': serializers.IntegerField(),
+                'start_time': serializers.DateTimeField(),
+                'end_time': serializers.DateTimeField(),
+                'rate': serializers.DecimalField(max_digits=10, decimal_places=2),
+                'status': serializers.CharField(),
+                'is_negotiable': serializers.BooleanField(),
+                'min_rate': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
+                'address': serializers.CharField(allow_null=True),
+                'latitude': serializers.FloatField(allow_null=True),
+                'longitude': serializers.FloatField(allow_null=True),
+            }
+        ),
+        404: inline_serializer(name='ShiftNotFoundError', fields={'error': serializers.CharField()})
+    }
+)
+@route("shifts/<uuid:shift_id>/", name="shift-detail")
+class ShiftDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, shift_id):
+        try:
+            selector = ShiftSelector()
+            shift = selector.get_shift(shift_id)
+            
+            data = {
+                "id": str(shift.id),
+                "facility": shift.facility.name,
+                "role": shift.role,
+                "specialty": shift.specialty,
+                "quantity_needed": shift.quantity_needed,
+                "quantity_filled": shift.quantity_filled,
+                "start_time": shift.start_time,
+                "end_time": shift.end_time,
+                "rate": shift.rate,
+                "status": shift.status,
+                "is_negotiable": shift.is_negotiable,
+                "min_rate": shift.min_rate,
+                "address": shift.address,
+                "latitude": shift.latitude,
+                "longitude": shift.longitude,
+            }
+            return Response(data)
+        except Exception as e:
+            return Response({"error": "Shift not found"}, status=404)
+
+@extend_schema(
+    responses={
+        200: inline_serializer(
+            name='ShiftApplicantsResponse',
+            many=True,
+            fields={
+                'id': serializers.IntegerField(),
+                'professional_name': serializers.CharField(),
+                'professional_email': serializers.EmailField(),
+                'status': serializers.CharField(),
+                'applied_at': serializers.DateTimeField(),
+                'clock_in_time': serializers.DateTimeField(required=False),
+                'clock_out_time': serializers.DateTimeField(required=False),
+            }
+        ),
+        403: inline_serializer(name='ApplicantsPermissionError', fields={'error': serializers.CharField()})
+    }
+)
+@route("shifts/<uuid:shift_id>/applicants/", name="shift-applicants")
+class ShiftApplicantsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, shift_id):
+        try:
+            selector = ShiftSelector()
+            applications = selector.list_applications(shift_id, request.user)
+            
+            data = [{
+                "id": app.id,
+                "professional_name": f"{app.professional.user.first_name} {app.professional.user.last_name}".strip() or app.professional.user.email,
+                "professional_email": app.professional.user.email,
+                "status": app.status,
+                "applied_at": app.created_at,
+                "clock_in_time": app.clock_in_time,
+                "clock_out_time": app.clock_out_time,
+            } for app in applications]
+            
+            return Response(data)
+        except PermissionError as e:
+            return Response({"error": str(e)}, status=403)
+        except Exception as e:
             return Response({"error": str(e)}, status=400)
 
 @extend_schema(
@@ -149,6 +265,30 @@ class ShiftApplicationManageView(APIView):
         try:
             service(user=request.user, application_id=application_id, action=action)
             return Response({"status": "success"})
+        except PermissionError as e:
+            return Response({"error": str(e)}, status=403)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+
+@extend_schema(
+    responses={
+        200: inline_serializer(
+            name='ApproveShiftStartResponse',
+            fields={'status': serializers.CharField()}
+        ),
+        403: inline_serializer(name='ApproveStartPermissionError', fields={'error': serializers.CharField()}),
+        400: inline_serializer(name='ApproveStartValidationError', fields={'error': serializers.CharField()})
+    }
+)
+@route("shifts/applications/<int:application_id>/approve-start/", name="shift-application-approve-start")
+class ShiftApplicationApproveStartView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, application_id):
+        service = ApproveShiftStartService()
+        try:
+            service(user=request.user, application_id=application_id)
+            return Response({"status": "approved"})
         except PermissionError as e:
             return Response({"error": str(e)}, status=403)
         except ValueError as e:
@@ -318,6 +458,7 @@ class FacilityShiftListView(APIView):
         data = [{
             "id": shift.id,
             "role": shift.role,
+            "specialty": shift.specialty,
             "start_time": shift.start_time,
             "end_time": shift.end_time,
             "status": shift.status,

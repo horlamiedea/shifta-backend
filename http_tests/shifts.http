@@ -1,0 +1,209 @@
+### Shifta API - Shifts Endpoints
+### Use with REST Client extension in VS Code or any HTTP client
+
+@baseUrl = http://localhost:8000/api/v1
+@contentType = application/json
+
+### ============================================
+### IMPORTANT: First login to get tokens
+### Run the login requests in auth.http first
+### Then copy the token here
+### ============================================
+@facilityToken = YOUR_FACILITY_TOKEN_HERE
+@professionalToken = YOUR_PROFESSIONAL_TOKEN_HERE
+
+### ============================================
+### LIST ALL OPEN SHIFTS (Public)
+### ============================================
+GET {{baseUrl}}/shifts/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### LIST OPEN SHIFTS - Filter by Specialty
+### ============================================
+GET {{baseUrl}}/shifts/?specialty=ICU Nurse
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### GET FACILITY'S SHIFTS
+### ============================================
+GET {{baseUrl}}/shifts/facility/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### GET FACILITY DASHBOARD STATS
+### ============================================
+GET {{baseUrl}}/facility/dashboard/stats/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### GET FACILITY QR CODE
+### ============================================
+GET {{baseUrl}}/facility/qrcode/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### CREATE NEW SHIFT
+### ============================================
+POST {{baseUrl}}/shifts/
+Authorization: Token {{facilityToken}}
+Content-Type: {{contentType}}
+
+{
+    "role": "Night Nurse",
+    "specialty": "Registered Nurse (General)",
+    "quantity_needed": 2,
+    "start_time": "2026-01-25T20:00:00Z",
+    "end_time": "2026-01-26T08:00:00Z",
+    "rate": 25000,
+    "is_negotiable": true,
+    "min_rate": 20000
+}
+
+### ============================================
+### GET SHIFT DETAILS
+### Replace {shift_id} with actual UUID
+### ============================================
+@shiftId = REPLACE_WITH_SHIFT_UUID
+GET {{baseUrl}}/shifts/{{shiftId}}/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### GET SHIFT APPLICANTS (Facility Only)
+### ============================================
+GET {{baseUrl}}/shifts/{{shiftId}}/applicants/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### APPLY FOR SHIFT (Professional Only)
+### ============================================
+POST {{baseUrl}}/shifts/{{shiftId}}/apply/
+Authorization: Token {{professionalToken}}
+
+### ============================================
+### MANAGE APPLICATION - Confirm
+### Replace {application_id} with actual ID
+### ============================================
+@applicationId = 1
+POST {{baseUrl}}/shifts/applications/{{applicationId}}/manage/
+Authorization: Token {{facilityToken}}
+Content-Type: {{contentType}}
+
+{
+    "action": "CONFIRM"
+}
+
+### ============================================
+### MANAGE APPLICATION - Reject
+### ============================================
+POST {{baseUrl}}/shifts/applications/{{applicationId}}/manage/
+Authorization: Token {{facilityToken}}
+Content-Type: {{contentType}}
+
+{
+    "action": "REJECT"
+}
+
+### ============================================
+### APPROVE SHIFT START (When professional clocks in)
+### ============================================
+POST {{baseUrl}}/shifts/applications/{{applicationId}}/approve-start/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### CLOCK IN (Professional)
+### ============================================
+POST {{baseUrl}}/shifts/{{shiftId}}/clock-in/
+Authorization: Token {{professionalToken}}
+Content-Type: {{contentType}}
+
+{
+    "lat": 6.4541,
+    "lng": 3.3947,
+    "qr_code_data": "FACILITY_UUID_FROM_QR_CODE"
+}
+
+### ============================================
+### CLOCK OUT (Professional)
+### ============================================
+POST {{baseUrl}}/shifts/{{shiftId}}/clock-out/
+Authorization: Token {{professionalToken}}
+Content-Type: {{contentType}}
+
+{
+    "lat": 6.4541,
+    "lng": 3.3947,
+    "qr_code_data": "FACILITY_UUID_FROM_QR_CODE"
+}
+
+### ============================================
+### CANCEL SHIFT - Facility (Remove Professional)
+### ============================================
+POST {{baseUrl}}/shifts/{{shiftId}}/cancel/
+Authorization: Token {{facilityToken}}
+Content-Type: {{contentType}}
+
+{
+    "professional_id": "PROFESSIONAL_UUID_HERE"
+}
+
+### ============================================
+### CANCEL SHIFT - Professional
+### ============================================
+POST {{baseUrl}}/shifts/{{shiftId}}/cancel/
+Authorization: Token {{professionalToken}}
+
+### ============================================
+### GET CALENDAR VIEW
+### ============================================
+GET {{baseUrl}}/shifts/calendar/?date_start=2026-01-01&date_end=2026-01-31
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### GET CALENDAR VIEW - Filter by Applicant
+### ============================================
+GET {{baseUrl}}/shifts/calendar/?date_start=2026-01-01&date_end=2026-01-31&applicant_id=PROFESSIONAL_UUID
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### REQUEST EXTRA TIME (Professional)
+### ============================================
+POST {{baseUrl}}/shifts/extra-time/request/
+Authorization: Token {{professionalToken}}
+Content-Type: {{contentType}}
+
+{
+    "shift_application_id": 1,
+    "hours": 2,
+    "reason": "Patient requires additional care"
+}
+
+### ============================================
+### ADD EXTRA TIME (Facility)
+### ============================================
+POST {{baseUrl}}/shifts/extra-time/add/
+Authorization: Token {{facilityToken}}
+Content-Type: {{contentType}}
+
+{
+    "shift_application_id": 1,
+    "hours": 3,
+    "reason": "Emergency situation requires extended coverage"
+}
+
+### ============================================
+### APPROVE EXTRA TIME
+### ============================================
+POST {{baseUrl}}/shifts/extra-time/approve/
+Authorization: Token {{facilityToken}}
+Content-Type: {{contentType}}
+
+{
+    "request_id": "EXTRA_TIME_REQUEST_UUID"
+}
+
+### ============================================
+### GET PROFESSIONAL'S AVAILABLE SHIFTS
+### ============================================
+GET {{baseUrl}}/shifts/professional/
+Authorization: Token {{professionalToken}}

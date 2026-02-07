@@ -1,0 +1,50 @@
+### Shifta API - Billing & Wallet Endpoints
+### Use with REST Client extension in VS Code or any HTTP client
+
+@baseUrl = http://localhost:8000/api/v1
+@contentType = application/json
+
+### ============================================
+### IMPORTANT: First login to get tokens
+### Run the login requests in auth.http first
+### Then copy the token here
+### ============================================
+@facilityToken = YOUR_FACILITY_TOKEN_HERE
+@professionalToken = YOUR_PROFESSIONAL_TOKEN_HERE
+
+### ============================================
+### GET TRANSACTIONS (All Users)
+### ============================================
+GET {{baseUrl}}/billing/transactions/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### GET TRANSACTIONS - Professional
+### ============================================
+GET {{baseUrl}}/billing/transactions/
+Authorization: Token {{professionalToken}}
+
+### ============================================
+### GET INVOICES (Facility Only)
+### ============================================
+GET {{baseUrl}}/billing/invoices/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### WITHDRAW FUNDS (Professional Only)
+### ============================================
+POST {{baseUrl}}/billing/withdraw/
+Authorization: Token {{professionalToken}}
+Content-Type: {{contentType}}
+
+{
+    "amount": 10000
+}
+
+### ============================================
+### RELEASE FUNDS EARLY (Facility)
+### Release payment to professional before shift completion
+### ============================================
+@applicationId = REPLACE_WITH_APPLICATION_UUID
+POST {{baseUrl}}/billing/release-funds/{{applicationId}}/
+Authorization: Token {{facilityToken}}

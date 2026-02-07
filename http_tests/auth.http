@@ -1,0 +1,86 @@
+### Shifta API - Authentication Endpoints
+### Use with REST Client extension in VS Code or any HTTP client
+
+@baseUrl = http://localhost:8000/api/v1
+@contentType = application/json
+
+### ============================================
+### LOGIN - Facility
+### ============================================
+# @name facilityLogin
+POST {{baseUrl}}/auth/login/
+Content-Type: {{contentType}}
+
+{
+    "email": "facility1@shifta.com",
+    "password": "password123"
+}
+
+### Save the token from response
+@facilityToken = {{facilityLogin.response.body.$.data.token}}
+
+### ============================================
+### LOGIN - Professional
+### ============================================
+# @name professionalLogin
+POST {{baseUrl}}/auth/login/
+Content-Type: {{contentType}}
+
+{
+    "email": "nurse1@shifta.com",
+    "password": "password123"
+}
+
+### Save the token from response
+@professionalToken = {{professionalLogin.response.body.$.data.token}}
+
+### ============================================
+### REGISTER - New Facility
+### ============================================
+POST {{baseUrl}}/auth/register/
+Content-Type: {{contentType}}
+
+{
+    "email": "newfacility@test.com",
+    "password": "testpassword123",
+    "user_type": "facility",
+    "name": "Test Medical Center",
+    "address": "456 Test Street, Lagos",
+    "rc_number": "RC999999"
+}
+
+### ============================================
+### REGISTER - New Professional
+### ============================================
+POST {{baseUrl}}/auth/register/
+Content-Type: {{contentType}}
+
+{
+    "email": "newprofessional@test.com",
+    "password": "testpassword123",
+    "user_type": "professional",
+    "license_number": "TEST/2024/12345"
+}
+
+### ============================================
+### GET PROFILE - Facility
+### ============================================
+GET {{baseUrl}}/auth/profile/
+Authorization: Token {{facilityToken}}
+
+### ============================================
+### GET PROFILE - Professional
+### ============================================
+GET {{baseUrl}}/auth/profile/
+Authorization: Token {{professionalToken}}
+
+### ============================================
+### UPDATE PROFILE
+### ============================================
+PUT {{baseUrl}}/auth/profile/
+Authorization: Token {{facilityToken}}
+Content-Type: {{contentType}}
+
+{
+    "name": "Lagos General Hospital Updated"
+}

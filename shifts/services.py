@@ -1,12 +1,13 @@
 from django.db import transaction
 from core.services import BaseService
+from core.geocoding import geocoding_service
 from .models import Shift, ShiftApplication
 from .tasks import notify_matching_professionals
 from decimal import Decimal
 
 class ShiftCreateService(BaseService):
     @transaction.atomic
-    def __call__(self, user, role, specialty, quantity_needed, start_time, end_time, rate, is_negotiable=False, min_rate=None):
+    def __call__(self, user, role, specialty, quantity_needed, start_time, end_time, rate, is_negotiable=False, min_rate=None, address=None, latitude=None, longitude=None):
         if not user.is_facility:
             raise PermissionError("Only facilities can create shifts.")
         
@@ -39,6 +40,41 @@ class ShiftCreateService(BaseService):
         facility.wallet_balance -= total_cost
         facility.save()
         
+        # Handle location - use provided values or fallback to facility location
+        shift_address = address
+        shift_latitude = latitude
+        shift_longitude = longitude
+        
+        # If no location provided, use facility's address and geocode it
+        if not shift_address and not (shift_latitude and shift_longitude):
+            # Use facility address as default
+            shift_address = facility.address
+            
+            # Check if facility already has coordinates
+            if facility.location_lat and facility.location_lng:
+                shift_latitude = facility.location_lat
+                shift_longitude = facility.location_lng
+            elif facility.address:
+                # Geocode facility address to get coordinates
+                geocode_result = geocoding_service.geocode_address(facility.address)
+                if geocode_result.get('success'):
+                    shift_latitude = geocode_result['lat']
+                    shift_longitude = geocode_result['lng']
+                    shift_address = geocode_result.get('formatted_address', facility.address)
+                    
+                    # Also update facility with coordinates for future use
+                    facility.location_lat = shift_latitude
+                    facility.location_lng = shift_longitude
+                    facility.save()
+        
+        # If address provided but no coordinates, geocode it
+        elif shift_address and not (shift_latitude and shift_longitude):
+            geocode_result = geocoding_service.geocode_address(shift_address)
+            if geocode_result.get('success'):
+                shift_latitude = geocode_result['lat']
+                shift_longitude = geocode_result['lng']
+                shift_address = geocode_result.get('formatted_address', shift_address)
+        
         shift = Shift.objects.create(
             facility=facility,
             role=role,
@@ -49,13 +85,17 @@ class ShiftCreateService(BaseService):
             end_time=end_time,
             rate=rate, # Storing hourly rate
             is_negotiable=is_negotiable,
-            min_rate=min_rate
+            min_rate=min_rate,
+            address=shift_address,
+            latitude=shift_latitude,
+            longitude=shift_longitude
         )
         
         # Trigger notification task
         notify_matching_professionals.delay(shift.id)
         
         return shift
+
 
 class ShiftApplyService(BaseService):
     def __call__(self, user, shift_id):
