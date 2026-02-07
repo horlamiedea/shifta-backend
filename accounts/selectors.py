@@ -25,6 +25,7 @@ class UserSelector(BaseSelector):
             data["facility"] = {
                 "name": user.facility.name,
                 "rc_number": user.facility.rc_number,
-                "is_verified": user.facility.is_verified
+                "is_verified": user.facility.is_verified,
+                "wallet_balance": str(user.facility.wallet_balance),
             }
         return data
