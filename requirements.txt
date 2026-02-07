@@ -2,6 +2,7 @@ Django>=5.1
 djangorestframework
 drf-spectacular
 django-filter
+django-cors-headers
 channels[daphne]
 celery
 redis
