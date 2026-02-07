@@ -86,18 +86,42 @@ class ShiftListCreateView(APIView):
         }
     )
     def post(self, request):
+        from datetime import datetime
+        from decimal import Decimal
+        
         service = ShiftCreateService()
         try:
+            # Parse datetime strings
+            start_time_str = request.data.get("start_time")
+            end_time_str = request.data.get("end_time")
+            
+            # Handle both ISO format and datetime-local format
+            try:
+                start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                start_time = datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M")
+            
+            try:
+                end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                end_time = datetime.strptime(end_time_str, "%Y-%m-%dT%H:%M")
+            
+            # Parse rate to Decimal
+            rate = Decimal(str(request.data.get("rate")))
+            min_rate = request.data.get("min_rate")
+            if min_rate is not None:
+                min_rate = Decimal(str(min_rate))
+            
             shift = service(
                 user=request.user,
                 role=request.data.get("role"),
                 specialty=request.data.get("specialty"),
                 quantity_needed=request.data.get("quantity_needed"),
-                start_time=request.data.get("start_time"),
-                end_time=request.data.get("end_time"),
-                rate=request.data.get("rate"),
+                start_time=start_time,
+                end_time=end_time,
+                rate=rate,
                 is_negotiable=request.data.get("is_negotiable", False),
-                min_rate=request.data.get("min_rate"),
+                min_rate=min_rate,
                 address=request.data.get("address"),
                 latitude=request.data.get("latitude"),
                 longitude=request.data.get("longitude")
