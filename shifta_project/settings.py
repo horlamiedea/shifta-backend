@@ -30,10 +30,12 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:8000",
+    "http://172.203.248.172:3000"
 ]
 
 CSRF_TRUSTED_ORIGINS = [
-    "https://urahealth.westus2.cloudapp.azure.com/"
+    "https://urahealth.westus2.cloudapp.azure.com/",
+    "http://172.203.248.172:8000",
 ]
 
 
