@@ -24,7 +24,7 @@ SECRET_KEY = "django-insecure-t7i^fltw=fd6=sq4%$c+)2d8_=bst-m4-n15#^#4w9^v9-^6%5
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ["http://qwikshifthealth.com", "https://shifta-frontend.vercel.app/", "localhost", "127.0.0.1", "172.203.248.172"]
+ALLOWED_HOSTS = ["http://qwikshifthealth.com", "https://shifta-frontend.vercel.app", "localhost", "127.0.0.1", "172.203.248.172"]
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
@@ -32,7 +32,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:8000",
     "http://172.203.248.172:3000",
     "http://qwikshifthealth.com:3000",
-    "https://shifta-frontend.vercel.app/"
+    "https://shifta-frontend.vercel.app"
 ]
 
 CSRF_TRUSTED_ORIGINS = [
