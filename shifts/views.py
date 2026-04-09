@@ -219,7 +219,7 @@ class ShiftApplicantsView(APIView):
         try:
             selector = ShiftSelector()
             applications = selector.list_applications(shift_id, request.user)
-            
+
             data = [{
                 "id": app.id,
                 "professional_name": f"{app.professional.user.first_name} {app.professional.user.last_name}".strip() or app.professional.user.email,
@@ -228,8 +228,10 @@ class ShiftApplicantsView(APIView):
                 "applied_at": app.created_at,
                 "clock_in_time": app.clock_in_time,
                 "clock_out_time": app.clock_out_time,
+                "check_in_code": app.check_in_code if app.status in ('CONFIRMED', 'IN_PROGRESS', 'COMPLETED') else None,
+                "check_out_code": app.check_out_code if app.status in ('CONFIRMED', 'IN_PROGRESS', 'COMPLETED') else None,
             } for app in applications]
-            
+
             return Response(data)
         except PermissionError as e:
             return Response({"error": str(e)}, status=403)
@@ -279,7 +281,7 @@ class ShiftApplyView(APIView):
         400: inline_serializer(name='ManageValidationError', fields={'error': serializers.CharField()})
     }
 )
-@route("shifts/applications/<int:application_id>/manage/", name="shift-application-manage")
+@route("shifts/applications/<uuid:application_id>/manage/", name="shift-application-manage")
 class ShiftApplicationManageView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -304,7 +306,7 @@ class ShiftApplicationManageView(APIView):
         400: inline_serializer(name='ApproveStartValidationError', fields={'error': serializers.CharField()})
     }
 )
-@route("shifts/applications/<int:application_id>/approve-start/", name="shift-application-approve-start")
+@route("shifts/applications/<uuid:application_id>/approve-start/", name="shift-application-approve-start")
 class ShiftApplicationApproveStartView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -343,9 +345,7 @@ class FacilityQRCodeView(APIView):
     request=inline_serializer(
         name='ShiftClockInRequest',
         fields={
-            'lat': serializers.FloatField(),
-            'lng': serializers.FloatField(),
-            'qr_code_data': serializers.CharField(),
+            'code': serializers.CharField(help_text='6-digit check-in code provided by facility'),
         }
     ),
     responses={
@@ -362,13 +362,13 @@ class ShiftClockInView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, shift_id):
-        lat = request.data.get("lat")
-        lng = request.data.get("lng")
-        qr_code_data = request.data.get("qr_code_data")
-        
+        code = request.data.get("code")
+        if not code:
+            return Response({"error": "Check-in code is required."}, status=400)
+
         service = ClockInService()
         try:
-            service(user=request.user, shift_id=shift_id, lat=lat, lng=lng, qr_code_data=qr_code_data)
+            service(user=request.user, shift_id=shift_id, code=code)
             return Response({"status": "clocked_in"})
         except PermissionError as e:
             return Response({"error": str(e)}, status=403)
@@ -379,9 +379,7 @@ class ShiftClockInView(APIView):
     request=inline_serializer(
         name='ShiftClockOutRequest',
         fields={
-            'lat': serializers.FloatField(),
-            'lng': serializers.FloatField(),
-            'qr_code_data': serializers.CharField(),
+            'code': serializers.CharField(help_text='6-digit check-out code provided by facility'),
         }
     ),
     responses={
@@ -398,13 +396,13 @@ class ShiftClockOutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, shift_id):
-        lat = request.data.get("lat")
-        lng = request.data.get("lng")
-        qr_code_data = request.data.get("qr_code_data")
-        
+        code = request.data.get("code")
+        if not code:
+            return Response({"error": "Check-out code is required."}, status=400)
+
         service = ClockOutService()
         try:
-            service(user=request.user, shift_id=shift_id, lat=lat, lng=lng, qr_code_data=qr_code_data)
+            service(user=request.user, shift_id=shift_id, code=code)
             return Response({"status": "clocked_out"})
         except PermissionError as e:
             return Response({"error": str(e)}, status=403)
@@ -561,23 +559,79 @@ class ProfessionalShiftListView(APIView):
     def get(self, request):
         if not request.user.is_professional:
             return Response({"error": "Only professionals can view this."}, status=403)
-            
+
         selector = ShiftSelector()
         shifts = selector.list_professional_shifts(request.user.professional)
-        
+
         data = [{
-            "id": shift.id,
+            "id": str(shift.id),
             "facility": shift.facility.name,
+            "facility_id": str(shift.facility.id),
             "role": shift.role,
+            "specialty": shift.specialty,
+            "quantity_needed": shift.quantity_needed,
+            "quantity_filled": shift.quantity_filled,
             "start_time": shift.start_time,
             "end_time": shift.end_time,
             "rate": shift.rate,
-            "distance": "5km" # Placeholder or calculate
+            "status": shift.status,
+            "is_negotiable": shift.is_negotiable,
+            "min_rate": shift.min_rate,
+            "address": shift.address,
+            "latitude": shift.latitude,
+            "longitude": shift.longitude,
+            "created_at": shift.created_at,
         } for shift in shifts]
-        
+
         return Response(data)
 
 
+@route("shifts/my-applications/", name="professional-my-applications")
+class ProfessionalMyApplicationsView(APIView):
+    """Returns the professional's shift applications with nested shift data."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.is_professional:
+            return Response({"error": "Only professionals can view this."}, status=403)
+
+        from .models import ShiftApplication
+        applications = ShiftApplication.objects.filter(
+            professional=request.user.professional
+        ).select_related('shift', 'shift__facility').order_by('-created_at')
+
+        data = [{
+            "id": str(app.id),
+            "shift_id": str(app.shift.id),
+            "professional_id": str(app.professional.id),
+            "status": app.status,
+            "clock_in_time": app.clock_in_time.isoformat() if app.clock_in_time else None,
+            "clock_out_time": app.clock_out_time.isoformat() if app.clock_out_time else None,
+            "created_at": app.created_at.isoformat(),
+            "check_in_code": app.check_in_code,
+            "check_out_code": app.check_out_code,
+            "shift": {
+                "id": str(app.shift.id),
+                "facility": {"id": str(app.shift.facility.id), "name": app.shift.facility.name},
+                "facility_name": app.shift.facility.name,
+                "role": app.shift.role,
+                "specialty": app.shift.specialty,
+                "quantity_needed": app.shift.quantity_needed,
+                "quantity_filled": app.shift.quantity_filled,
+                "start_time": app.shift.start_time.isoformat(),
+                "end_time": app.shift.end_time.isoformat(),
+                "rate": str(app.shift.rate),
+                "status": app.shift.status,
+                "is_negotiable": app.shift.is_negotiable,
+                "min_rate": str(app.shift.min_rate) if app.shift.min_rate else None,
+                "address": app.shift.address,
+                "latitude": app.shift.latitude,
+                "longitude": app.shift.longitude,
+                "created_at": app.shift.created_at.isoformat(),
+            }
+        } for app in applications]
+
+        return Response(data)
 
 
 @extend_schema(

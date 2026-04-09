@@ -3,6 +3,8 @@ from django.utils.translation import gettext_lazy as _
 from accounts.models import Facility, Professional
 from core.models import BaseModel
 import uuid
+import random
+import string
 
 class Shift(BaseModel):
     STATUS_CHOICES = (
@@ -61,12 +63,21 @@ class ShiftApplication(BaseModel):
     # applied_at is replaced by created_at from BaseModel
     clock_in_time = models.DateTimeField(null=True, blank=True)
     clock_out_time = models.DateTimeField(null=True, blank=True)
-    
+
+    # Code-based check-in/check-out (unique per professional per shift)
+    check_in_code = models.CharField(max_length=6, blank=True, null=True)
+    check_out_code = models.CharField(max_length=6, blank=True, null=True)
+
     class Meta:
         unique_together = ('shift', 'professional')
-        
+
     def __str__(self):
         return f"{self.professional} applied for {self.shift}"
+
+    @staticmethod
+    def generate_code():
+        """Generate a random 6-digit numeric code."""
+        return ''.join(random.choices(string.digits, k=6))
 
 class ExtraTimeRequest(BaseModel):
     STATUS_CHOICES = (

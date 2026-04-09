@@ -12,8 +12,8 @@ def payout_professional(application_id):
     except ShiftApplication.DoesNotExist:
         return
 
-    if application.status != 'CONFIRMED' or not application.clock_out_time:
-        return # Not eligible
+    if application.status not in ('CONFIRMED', 'COMPLETED', 'IN_PROGRESS') or not application.clock_out_time:
+        return  # Not eligible
 
     professional = application.professional
     shift = application.shift

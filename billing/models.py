@@ -3,11 +3,31 @@ from accounts.models import Facility, Professional, User
 from shifts.models import Shift
 from core.models import BaseModel
 
+
+class EmbedlyWallet(BaseModel):
+    """Stores Embedly virtual wallet details for each user."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='embedly_wallet')
+    customer_id = models.CharField(max_length=255, blank=True, null=True)
+    wallet_id = models.CharField(max_length=255, blank=True, null=True)
+    account_number = models.CharField(max_length=50, blank=True, null=True)
+    account_name = models.CharField(max_length=255, blank=True, null=True)
+    bank_name = models.CharField(max_length=255, blank=True, null=True)
+    bank_code = models.CharField(max_length=50, blank=True, null=True)
+    provider = models.CharField(max_length=50, default='EMBEDLY')
+    is_active = models.BooleanField(default=True)
+    meta = models.JSONField(default=dict, blank=True)
+
+    def __str__(self):
+        return f"Wallet: {self.account_number} ({self.user.email})"
+
+
 class Transaction(BaseModel):
     TRANSACTION_TYPES = (
         ('PAYOUT', 'Payout'),
         ('CHARGE', 'Charge'),
         ('REFUND', 'Refund'),
+        ('FUNDING', 'Funding'),
+        ('WITHDRAWAL', 'Withdrawal'),
     )
     
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='transactions')

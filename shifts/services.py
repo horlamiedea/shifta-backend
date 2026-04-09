@@ -140,8 +140,11 @@ class ShiftManageApplicationService(BaseService):
         if action == 'CONFIRM':
             if application.shift.quantity_filled >= application.shift.quantity_needed:
                 raise ValueError("Shift is already filled.")
-                
+
             application.status = 'CONFIRMED'
+            # Generate unique check-in and check-out codes
+            application.check_in_code = ShiftApplication.generate_code()
+            application.check_out_code = ShiftApplication.generate_code()
             application.save()
             
             # Update shift filled count
@@ -158,83 +161,80 @@ class ShiftManageApplicationService(BaseService):
         return application
 
 class ClockInService(BaseService):
-    def __call__(self, user, shift_id, lat, lng, qr_code_data):
-        # 1. Verify User is Professional
+    """Code-based clock-in: professional enters the check-in code given by facility."""
+    def __call__(self, user, shift_id, code):
         if not user.is_professional:
             raise PermissionError("Only professionals can clock in.")
-            
-        # 2. Get Application
+
         try:
-            application = ShiftApplication.objects.get(shift__id=shift_id, professional=user.professional, status='CONFIRMED')
+            application = ShiftApplication.objects.get(
+                shift__id=shift_id, professional=user.professional, status='CONFIRMED'
+            )
         except ShiftApplication.DoesNotExist:
             raise ValueError("No confirmed application for this shift.")
-            
-        # 3. Verify QR Code (Simple check: qr_code_data == facility_id or similar)
-        # PRD: "unique QR/Barcode for my facility"
-        if qr_code_data != str(application.shift.facility.id):
-             raise ValueError("Invalid Facility QR Code.")
-          # 4. Geo-fencing Check
-        # Use Shift location if available, else Facility location
-        from core.utils import haversine
-        facility = application.shift.facility # Get facility once
-        target_lat = application.shift.latitude or facility.location_lat
-        target_lng = application.shift.longitude or facility.location_lng
-        
-        if target_lat is None or target_lng is None:
-             # If no location set, maybe skip check or enforce facility to set it?
-             # For now, let's assume location is mandatory or skip if missing.
-             pass
-        else:
-            distance = haversine(lat, lng, target_lat, target_lng)
-            if distance > 2.0: # 2km radius as per Phase 3 requirement
-                raise ValueError(f"You are too far from the shift location. Distance: {distance:.2f}km")
-        
-        # 5. Clock In
+
+        # Validate check-in code
+        if not application.check_in_code:
+            raise ValueError("No check-in code assigned. Contact the facility.")
+        if code != application.check_in_code:
+            raise ValueError("Invalid check-in code.")
+
         from django.utils import timezone
         application.clock_in_time = timezone.now()
-        application.status = 'ATTENDANCE_PENDING' # Phase 3: Needs approval
+        application.status = 'IN_PROGRESS'
         application.save()
-        
-        # 6. Notify Facility
+
+        # Notify Facility
         from core.models import Notification
         Notification.objects.create(
-            user=facility.user,
-            title="Shift Start Request",
-            message=f"{user.email} has started the shift '{application.shift.role}'. Please approve.",
-            notification_type="SHIFT_START",
+            user=application.shift.facility.user,
+            title="Professional Checked In",
+            message=f"{user.first_name or user.email} has checked in for '{application.shift.role}'.",
+            notification_type="SHIFT_APPROVED",
             related_object_id=application.id
         )
-        
+
         return application
 
+
 class ClockOutService(BaseService):
-    def __call__(self, user, shift_id, lat, lng, qr_code_data):
-        # Similar checks...
+    """Code-based clock-out: professional enters the check-out code given by facility."""
+    def __call__(self, user, shift_id, code):
         if not user.is_professional:
             raise PermissionError("Only professionals can clock out.")
-            
+
         try:
-            application = ShiftApplication.objects.get(shift__id=shift_id, professional=user.professional, status='CONFIRMED')
+            application = ShiftApplication.objects.get(
+                shift__id=shift_id, professional=user.professional, status='IN_PROGRESS'
+            )
         except ShiftApplication.DoesNotExist:
-            raise ValueError("No confirmed application for this shift.")
-            
-        if qr_code_data != str(application.shift.facility.id):
-             raise ValueError("Invalid Facility QR Code.")
-             
-        from core.utils import haversine
-        distance = haversine(lat, lng, application.shift.facility.location_lat, application.shift.facility.location_lng)
-        if distance > 0.5:
-            raise ValueError("You must be at the facility to clock out.")
-            
+            raise ValueError("No active shift to clock out of.")
+
+        # Validate check-out code
+        if not application.check_out_code:
+            raise ValueError("No check-out code assigned. Contact the facility.")
+        if code != application.check_out_code:
+            raise ValueError("Invalid check-out code.")
+
         from django.utils import timezone
         application.clock_out_time = timezone.now()
+        application.status = 'COMPLETED'
         application.save()
-        
-        # Trigger Payment (Epic 6)
+
+        # Trigger Payment
         from billing.tasks import payout_professional
-        # Schedule for 24 hours later as per PRD
         payout_professional.apply_async((application.id,), countdown=24*3600)
-        
+
+        # Notify Facility
+        from core.models import Notification
+        Notification.objects.create(
+            user=application.shift.facility.user,
+            title="Professional Checked Out",
+            message=f"{user.first_name or user.email} has checked out of '{application.shift.role}'.",
+            notification_type="SHIFT_APPROVED",
+            related_object_id=application.id
+        )
+
         return application
 
 from .models import ExtraTimeRequest

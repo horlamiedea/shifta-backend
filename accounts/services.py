@@ -9,9 +9,19 @@ class UserRegisterService(BaseService):
     def __call__(self, email, password, user_type, **kwargs):
         if User.objects.filter(email=email).exists():
             raise ValueError("User with this email already exists.")
-        
+
         user = User.objects.create_user(email=email, password=password)
-        
+
+        # Set name fields if provided
+        if kwargs.get('first_name'):
+            user.first_name = kwargs.pop('first_name')
+        if kwargs.get('last_name'):
+            user.last_name = kwargs.pop('last_name')
+        if kwargs.get('phone_number'):
+            user.phone_number = kwargs.pop('phone_number')
+        if user.first_name or user.last_name or user.phone_number:
+            user.save()
+
         if user_type == "professional":
             Professional.objects.create(user=user, **kwargs)
         elif user_type == "facility":
@@ -19,7 +29,16 @@ class UserRegisterService(BaseService):
         else:
             # Admin or other types
             pass
-            
+
+        # Create Embedly wallet for the user
+        try:
+            from billing.wallet_service import WalletCreateService
+            wallet_service = WalletCreateService()
+            wallet_service(user)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Wallet creation failed for {email}: {e}")
+
         token, _ = Token.objects.get_or_create(user=user)
         return user, token.key
 
