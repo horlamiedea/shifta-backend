@@ -103,10 +103,22 @@ class ShiftCreateService(BaseService):
             latitude=shift_latitude,
             longitude=shift_longitude
         )
-        
+
+        # Record CHARGE transaction for audit trail
+        from billing.models import Transaction
+        import uuid
+        Transaction.objects.create(
+            user=user,
+            amount=total_cost,
+            transaction_type='CHARGE',
+            reference=str(uuid.uuid4()),
+            status='SUCCESS',
+            shift=shift,
+        )
+
         # Trigger notification task
         notify_matching_professionals.delay(shift.id)
-        
+
         return shift
 
 

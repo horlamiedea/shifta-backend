@@ -5,6 +5,7 @@ from rest_framework.authentication import TokenAuthentication
 from decimal import Decimal
 from core.router import route
 from .models import Invoice, Transaction, EmbedlyWallet
+from .serializers import TransactionSerializer
 from .services import WithdrawalService, ReleaseFundsService
 from .wallet_service import WalletFundingService, WalletFundingVerifyService, WalletWithdrawalService, WalletCreateService
 from .embedly_client import embedly_client
@@ -46,35 +47,22 @@ class InvoiceListView(APIView):
         } for i in invoices]
         return Response(data)
 
-@extend_schema(
-    responses={
-        200: inline_serializer(
-            name='TransactionListResponse',
-            many=True,
-            fields={
-                'id': serializers.UUIDField(),
-                'type': serializers.CharField(),
-                'amount': serializers.DecimalField(max_digits=12, decimal_places=2),
-                'status': serializers.CharField(),
-                'created_at': serializers.DateTimeField()
-            }
-        )
-    }
-)
+@extend_schema(responses={200: TransactionSerializer(many=True)})
 @route("billing/transactions/", name="transaction-list")
 class TransactionListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        transactions = Transaction.objects.filter(user=request.user).order_by('-created_at')
-        data = [{
-            "id": t.id,
-            "type": t.transaction_type,
-            "amount": t.amount,
-            "status": t.status,
-            "created_at": t.created_at
-        } for t in transactions]
-        return Response(data)
+        transactions = (
+            Transaction.objects
+            .filter(user=request.user)
+            .select_related('shift__facility')
+            .order_by('-created_at')
+        )
+        serializer = TransactionSerializer(
+            transactions, many=True, context={'request': request},
+        )
+        return Response(serializer.data)
 
 @extend_schema(
     responses={
