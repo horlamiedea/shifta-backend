@@ -38,7 +38,12 @@ class ShiftSelector(BaseSelector):
         shift = Shift.objects.get(id=shift_id)
         if shift.facility.user != user:
             raise PermissionError("Not your shift.")
-        return ShiftApplication.objects.filter(shift=shift)
+        return (
+            ShiftApplication.objects
+            .filter(shift=shift)
+            .select_related('professional__user', 'review')
+            .order_by('-created_at')
+        )
 
     def list_calendar_shifts(self, facility, date_start, date_end, applicant_id=None):
         qs = Shift.objects.filter(facility=facility)

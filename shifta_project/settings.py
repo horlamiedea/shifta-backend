@@ -190,8 +190,8 @@ CELERY_TIMEZONE = "UTC"
 
 # Celery Beat - periodic tasks
 CELERY_BEAT_SCHEDULE = {
-    "close-expired-open-shifts": {
-        "task": "shifts.tasks.close_expired_open_shifts",
+    "close-expired-shifts": {
+        "task": "shifts.tasks.close_expired_shifts",
         "schedule": 60 * 60,  # Run every hour
     },
 }

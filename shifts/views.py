@@ -319,21 +319,33 @@ class ShiftApplicantsView(APIView):
             selector = ShiftSelector()
             applications = selector.list_applications(shift_id, request.user)
 
-            data = [{
-                "id": app.id,
-                "professional_name": f"{app.professional.user.first_name} {app.professional.user.last_name}".strip() or app.professional.user.email,
-                "professional_email": app.professional.user.email,
-                "professional_phone": app.professional.user.phone_number or None,
-                "professional_license": app.professional.license_number or None,
-                "professional_specialties": app.professional.specialties or [],
-                "professional_is_verified": app.professional.is_verified,
-                "status": app.status,
-                "applied_at": app.created_at,
-                "clock_in_time": app.clock_in_time,
-                "clock_out_time": app.clock_out_time,
-                "check_in_code": app.check_in_code if app.status in ('CONFIRMED', 'IN_PROGRESS', 'COMPLETED') else None,
-                "check_out_code": app.check_out_code if app.status in ('CONFIRMED', 'IN_PROGRESS', 'COMPLETED') else None,
-            } for app in applications]
+            data = []
+            for app in applications:
+                review = getattr(app, 'review', None)
+                data.append({
+                    "id": app.id,
+                    "professional_id": str(app.professional.id),
+                    "professional_name": f"{app.professional.user.first_name} {app.professional.user.last_name}".strip() or app.professional.user.email,
+                    "professional_email": app.professional.user.email,
+                    "professional_phone": app.professional.user.phone_number or None,
+                    "professional_license": app.professional.license_number or None,
+                    "professional_specialties": app.professional.specialties or [],
+                    "professional_is_verified": app.professional.is_verified,
+                    "professional_avg_rating": float(app.professional.avg_rating),
+                    "professional_total_ratings": app.professional.total_ratings,
+                    "professional_completed_shifts": app.professional.total_completed_shifts,
+                    "status": app.status,
+                    "applied_at": app.created_at,
+                    "clock_in_time": app.clock_in_time,
+                    "clock_out_time": app.clock_out_time,
+                    "check_in_code": app.check_in_code if app.status in ('CONFIRMED', 'IN_PROGRESS', 'COMPLETED') else None,
+                    "check_out_code": app.check_out_code if app.status in ('CONFIRMED', 'IN_PROGRESS', 'COMPLETED') else None,
+                    "cancellation_reason": app.cancellation_reason or None,
+                    "cancelled_by": app.cancelled_by or None,
+                    "is_reviewed": review is not None,
+                    "review_rating": review.rating if review else None,
+                    "review_comment": review.comment if review else None,
+                })
 
             return Response(data)
         except PermissionError as e:
@@ -533,15 +545,21 @@ class ShiftCancelView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, shift_id):
+        reason = request.data.get("reason", "")
         try:
             if request.user.is_facility:
                 professional_id = request.data.get("professional_id")
                 service = FacilityCancelShiftService()
-                result = service(user=request.user, shift_id=shift_id, professional_id=professional_id)
+                result = service(
+                    user=request.user, shift_id=shift_id,
+                    professional_id=professional_id, reason=reason,
+                )
                 return Response(result)
             elif request.user.is_professional:
                 service = ProfessionalCancelShiftService()
-                result = service(user=request.user, shift_id=shift_id)
+                result = service(
+                    user=request.user, shift_id=shift_id, reason=reason,
+                )
                 return Response(result)
             else:
                 return Response({"error": "Invalid user role"}, status=403)
@@ -961,5 +979,100 @@ class CalendarViewSet(APIView):
                 "status": shift.status,
                 "professionals": professionals
             })
-            
+
         return Response(data)
+
+
+# ============================================================
+# RATING & REVIEW ENDPOINTS
+# ============================================================
+
+@extend_schema(
+    request=inline_serializer(
+        name='SubmitReviewRequest',
+        fields={
+            'application_id': serializers.UUIDField(),
+            'rating': serializers.IntegerField(help_text='1-5 star rating'),
+            'comment': serializers.CharField(required=False, allow_blank=True),
+        }
+    ),
+    responses={
+        201: inline_serializer(
+            name='SubmitReviewResponse',
+            fields={
+                'status': serializers.CharField(),
+                'review_id': serializers.UUIDField(),
+            }
+        ),
+        400: inline_serializer(name='ReviewValidationError', fields={'error': serializers.CharField()}),
+        403: inline_serializer(name='ReviewPermissionError', fields={'error': serializers.CharField()}),
+    },
+    description='Rate a professional after a completed shift. Rating 1-5, comment optional.',
+)
+@route("shifts/review/", name="shift-review")
+class ShiftReviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .rating_service import RatingService
+
+        service = RatingService()
+        try:
+            review = service.submit_review(
+                user=request.user,
+                application_id=request.data.get('application_id'),
+                rating=int(request.data.get('rating', 0)),
+                comment=request.data.get('comment', ''),
+            )
+            return Response({
+                "status": "reviewed",
+                "review_id": str(review.id),
+            }, status=201)
+        except PermissionError as e:
+            return Response({"error": str(e)}, status=403)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": str(e)}, status=400)
+
+
+@extend_schema(
+    responses={
+        200: inline_serializer(
+            name='ProfessionalStatsResponse',
+            fields={
+                'professional_id': serializers.UUIDField(),
+                'name': serializers.CharField(),
+                'avg_rating': serializers.DecimalField(max_digits=3, decimal_places=2),
+                'total_ratings': serializers.IntegerField(),
+                'total_completed_shifts': serializers.IntegerField(),
+                'total_cancelled_shifts': serializers.IntegerField(),
+                'completion_rate': serializers.FloatField(),
+                'professional_score': serializers.FloatField(),
+            }
+        ),
+    },
+)
+@route("professionals/<uuid:professional_id>/stats/", name="professional-stats")
+class ProfessionalStatsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, professional_id):
+        from accounts.models import Professional
+
+        try:
+            pro = Professional.objects.select_related('user').get(id=professional_id)
+        except Professional.DoesNotExist:
+            return Response({"error": "Professional not found"}, status=404)
+
+        name = f"{pro.user.first_name} {pro.user.last_name}".strip() or pro.user.email
+        return Response({
+            "professional_id": str(pro.id),
+            "name": name,
+            "avg_rating": pro.avg_rating,
+            "total_ratings": pro.total_ratings,
+            "total_completed_shifts": pro.total_completed_shifts,
+            "total_cancelled_shifts": pro.total_cancelled_shifts,
+            "completion_rate": round(pro.completion_rate, 2),
+            "professional_score": pro.professional_score,
+        })

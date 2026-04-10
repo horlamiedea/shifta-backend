@@ -68,6 +68,10 @@ class ShiftApplication(BaseModel):
     check_in_code = models.CharField(max_length=6, blank=True, null=True)
     check_out_code = models.CharField(max_length=6, blank=True, null=True)
 
+    # Cancellation tracking
+    cancellation_reason = models.TextField(blank=True, default='')
+    cancelled_by = models.CharField(max_length=20, blank=True, default='')  # 'PROFESSIONAL', 'FACILITY', 'SYSTEM'
+
     class Meta:
         unique_together = ('shift', 'professional')
 

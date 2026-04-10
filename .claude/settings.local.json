@@ -13,7 +13,9 @@
       "Bash(flutter analyze:*)",
       "Bash(grep -E \"\\\\.py$\")",
       "Bash(python -c \"from shifts.services import ShiftManageApplicationService; from shifts.cancellation_services import auto_promote_from_backlog, FacilityCancelShiftService, ProfessionalCancelShiftService; from shifts.emails import send_shift_promotion_email, send_shift_confirmed_email; from shifts.selectors import ShiftSelector; from shifts.views import ShiftListCreateView, ProfessionalShiftListView, FacilityPendingApplicationsView; print\\('All imports OK'\\)\")",
-      "Bash(python manage.py check)"
+      "Bash(python manage.py check)",
+      "Bash(python manage.py makemigrations)",
+      "Bash(python manage.py migrate)"
     ]
   }
 }
