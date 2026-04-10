@@ -2,10 +2,15 @@ from core.services import BaseSelector
 from .models import Shift, ShiftApplication
 
 class ShiftSelector(BaseSelector):
-    def list_open_shifts(self, specialty=None):
-        qs = Shift.objects.filter(status='OPEN')
+    def list_open_shifts(self, specialty=None, exclude_professional=None):
+        qs = Shift.objects.filter(status__in=['OPEN', 'FILLED'])
         if specialty:
             qs = qs.filter(specialty=specialty)
+        if exclude_professional:
+            applied_shift_ids = ShiftApplication.objects.filter(
+                professional=exclude_professional
+            ).values_list('shift_id', flat=True)
+            qs = qs.exclude(id__in=applied_shift_ids)
         return qs.order_by('-created_at')
 
     def list_facility_shifts(self, facility, status=None):
@@ -15,8 +20,15 @@ class ShiftSelector(BaseSelector):
         return qs.order_by('-created_at')
 
     def list_professional_shifts(self, professional):
-        # Return all OPEN shifts - no location or specialty filtering for now
-        qs = Shift.objects.filter(status='OPEN').select_related('facility')
+        # Exclude shifts the professional already applied to
+        applied_shift_ids = ShiftApplication.objects.filter(
+            professional=professional
+        ).values_list('shift_id', flat=True)
+        qs = (
+            Shift.objects.filter(status__in=['OPEN', 'FILLED'])
+            .exclude(id__in=applied_shift_ids)
+            .select_related('facility')
+        )
         return qs.order_by('-created_at')
 
     def get_shift(self, shift_id):

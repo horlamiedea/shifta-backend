@@ -167,26 +167,26 @@ class ShiftApplyService(BaseService):
     def __call__(self, user, shift_id):
         if not user.is_professional:
             raise PermissionError("Only professionals can apply.")
-            
+
         shift = Shift.objects.get(id=shift_id)
-        if shift.status != 'OPEN':
-            raise ValueError("Shift is not open.")
-            
+        # Allow applying to OPEN or FILLED shifts (backlog)
+        if shift.status not in ('OPEN', 'FILLED'):
+            raise ValueError("This shift is no longer accepting applications.")
+
         if ShiftApplication.objects.filter(shift=shift, professional=user.professional).exists():
             raise ValueError("Already applied.")
-            
-        # Clash Prevention (Phase 4)
-        # Check for any CONFIRMED or IN_PROGRESS application that overlaps with this shift's time
+
+        # Clash Prevention: block if already CONFIRMED/IN_PROGRESS at same time
         clashing_apps = ShiftApplication.objects.filter(
             professional=user.professional,
             status__in=['CONFIRMED', 'IN_PROGRESS', 'ATTENDANCE_PENDING'],
             shift__start_time__lt=shift.end_time,
             shift__end_time__gt=shift.start_time
         )
-        
+
         if clashing_apps.exists():
             raise ValueError("This shift clashes with another shift you have accepted.")
-            
+
         application = ShiftApplication.objects.create(
             shift=shift,
             professional=user.professional
@@ -198,32 +198,96 @@ class ShiftManageApplicationService(BaseService):
     def __call__(self, user, application_id, action):
         if not user.is_facility:
             raise PermissionError("Only facilities can manage applications.")
-            
-        application = ShiftApplication.objects.get(id=application_id)
+
+        application = ShiftApplication.objects.select_related(
+            'shift', 'professional__user'
+        ).get(id=application_id)
         if application.shift.facility != user.facility:
             raise PermissionError("Not your shift.")
-            
+
         if action == 'CONFIRM':
-            if application.shift.quantity_filled >= application.shift.quantity_needed:
+            shift = application.shift
+
+            if shift.quantity_filled >= shift.quantity_needed:
                 raise ValueError("Shift is already filled.")
 
+            # Clash check: ensure this professional doesn't already have a
+            # CONFIRMED/IN_PROGRESS shift that overlaps with this one
+            clashing_confirmed = ShiftApplication.objects.filter(
+                professional=application.professional,
+                status__in=['CONFIRMED', 'IN_PROGRESS', 'ATTENDANCE_PENDING'],
+                shift__start_time__lt=shift.end_time,
+                shift__end_time__gt=shift.start_time
+            ).exclude(id=application.id)
+
+            if clashing_confirmed.exists():
+                raise ValueError(
+                    "This professional already has a confirmed shift at this time. "
+                    "Their application will be removed automatically."
+                )
+
             application.status = 'CONFIRMED'
-            # Generate unique check-in and check-out codes
             application.check_in_code = ShiftApplication.generate_code()
             application.check_out_code = ShiftApplication.generate_code()
             application.save()
-            
+
             # Update shift filled count
-            shift = application.shift
             shift.quantity_filled += 1
             if shift.quantity_filled >= shift.quantity_needed:
                 shift.status = 'FILLED'
             shift.save()
-            
+
+            # --- Auto-reject clashing PENDING applications at other shifts ---
+            clashing_pending = ShiftApplication.objects.filter(
+                professional=application.professional,
+                status='PENDING',
+                shift__start_time__lt=shift.end_time,
+                shift__end_time__gt=shift.start_time
+            ).exclude(shift=shift).select_related('shift__facility__user')
+
+            from core.models import Notification
+
+            for clash_app in clashing_pending:
+                clash_app.status = 'REJECTED'
+                clash_app.save(update_fields=['status', 'updated_at'])
+
+                # Notify the affected facility
+                pro_name = (
+                    f"{application.professional.user.first_name} "
+                    f"{application.professional.user.last_name}".strip()
+                    or application.professional.user.email
+                )
+                Notification.objects.create(
+                    user=clash_app.shift.facility.user,
+                    title="Applicant No Longer Available",
+                    message=(
+                        f"{pro_name} has been confirmed for another shift at the same time "
+                        f"and is no longer available for '{clash_app.shift.role}'."
+                    ),
+                    notification_type="CANCELLED",
+                    related_object_id=clash_app.id,
+                )
+
+            # Notify the professional about confirmation
+            Notification.objects.create(
+                user=application.professional.user,
+                title="Shift Confirmed",
+                message=(
+                    f"You have been confirmed for '{shift.role}' at {shift.facility.name}. "
+                    f"Your check-in code is {application.check_in_code}."
+                ),
+                notification_type="SHIFT_APPROVED",
+                related_object_id=application.id,
+            )
+
+            # Send confirmation email
+            from .emails import send_shift_confirmed_email
+            send_shift_confirmed_email(application)
+
         elif action == 'REJECT':
             application.status = 'REJECTED'
             application.save()
-            
+
         return application
 
 class ClockInService(BaseService):

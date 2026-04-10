@@ -6,6 +6,7 @@ from .services import ShiftCreateService, ShiftUpdateService, ShiftApplyService,
 from .cancellation_services import FacilityCancelShiftService, ProfessionalCancelShiftService
 from .approval_services import ApproveShiftStartService
 from .selectors import ShiftSelector
+from .models import ShiftApplication
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes, inline_serializer
 from rest_framework import serializers
 
@@ -35,10 +36,13 @@ class ShiftListCreateView(APIView):
 
     def get(self, request):
         selector = ShiftSelector()
-        # Filter by specialty if provided
         specialty = request.query_params.get("specialty")
-        shifts = selector.list_open_shifts(specialty=specialty)
-        
+        # If the user is a professional, exclude shifts they already applied to
+        exclude_pro = None
+        if request.user.is_professional:
+            exclude_pro = request.user.professional
+        shifts = selector.list_open_shifts(specialty=specialty, exclude_professional=exclude_pro)
+
         data = [{
             "id": str(s.id),
             "facility": s.facility.name,
@@ -615,8 +619,8 @@ class FacilityDashboardStatsView(APIView):
             return Response({"error": "Only facilities can view stats"}, status=403)
             
         facility = request.user.facility
-        from .models import Shift, ShiftApplication
-        
+        from .models import Shift
+
         active_shifts = Shift.objects.filter(facility=facility, status='OPEN').count()
         # Staff on duty: Confirmed applications for shifts happening now (simplified to IN_PROGRESS or just CONFIRMED for now)
         # For better accuracy we'd check time, but let's use status if available or just confirmed count
@@ -669,6 +673,16 @@ class FacilityPendingApplicationsView(APIView):
 
         data = []
         for app in applications:
+            # Skip professionals who already have a confirmed shift clashing with this one
+            has_clash = ShiftApplication.objects.filter(
+                professional=app.professional,
+                status__in=['CONFIRMED', 'IN_PROGRESS', 'ATTENDANCE_PENDING'],
+                shift__start_time__lt=app.shift.end_time,
+                shift__end_time__gt=app.shift.start_time
+            ).exists()
+            if has_clash:
+                continue
+
             data.append({
                 "id": str(app.id),
                 "professional_name": f"{app.professional.user.first_name} {app.professional.user.last_name}".strip() or app.professional.user.email,
@@ -749,7 +763,6 @@ class ProfessionalMyApplicationsView(APIView):
         if not request.user.is_professional:
             return Response({"error": "Only professionals can view this."}, status=403)
 
-        from .models import ShiftApplication
         applications = ShiftApplication.objects.filter(
             professional=request.user.professional
         ).select_related('shift', 'shift__facility').order_by('-created_at')
