@@ -23,12 +23,21 @@ def notify_matching_professionals(shift_id):
     if not target_lat or not target_lng:
         return
 
+    # Match professionals whose specialties overlap with the shift specialty.
+    # Use icontains on the JSON array to support partial matches
+    # (e.g., shift specialty "ICU" matches professional specialty "ICU Nurse").
     potential_candidates = Professional.objects.filter(
-        specialties__contains=[shift.specialty],
         is_verified=True,
         current_location_lat__isnull=False,
         current_location_lng__isnull=False,
     ).select_related('user')
+
+    # Filter by specialty match (any professional specialty contains the shift specialty, or vice versa)
+    shift_spec = shift.specialty.lower()
+    potential_candidates = [
+        p for p in potential_candidates
+        if any(shift_spec in s.lower() or s.lower() in shift_spec for s in (p.specialties or []))
+    ]
 
     matching_pros = []
     for pro in potential_candidates:
