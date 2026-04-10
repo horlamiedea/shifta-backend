@@ -23,7 +23,7 @@ class ApproveShiftStartService(BaseService):
         application.save()
         
         # Notify Professional
-        Notification.objects.create(
+        Notification.send(
             user=application.professional.user,
             title="Shift Started",
             message=f"Your start for '{application.shift.role}' has been approved.",

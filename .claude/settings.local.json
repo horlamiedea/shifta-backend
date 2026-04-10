@@ -20,7 +20,13 @@
       "Bash(python3 -c \"from PIL import Image; print\\('Pillow available'\\)\")",
       "Bash(python3)",
       "Bash(dart run:*)",
-      "Bash(python manage.py backfill_codes)"
+      "Bash(python manage.py backfill_codes)",
+      "Bash(python manage.py makemigrations core)",
+      "Bash(python manage.py migrate core)",
+      "Bash(pip install:*)",
+      "Bash(pip freeze:*)",
+      "Bash(python -c \"import django; django.setup\\(\\); from core.models import Notification, DeviceToken; print\\('Models OK'\\); from core.push import send_push_to_user; print\\('Push module OK'\\)\")",
+      "Bash(DJANGO_SETTINGS_MODULE=shifta_project.settings python -c \"import django; django.setup\\(\\); from core.models import Notification, DeviceToken; print\\('Models OK'\\); from core.push import send_push_to_user; print\\('Push module OK'\\); from core.views import DeviceTokenRegisterView; print\\('Views OK'\\)\")"
     ]
   }
 }

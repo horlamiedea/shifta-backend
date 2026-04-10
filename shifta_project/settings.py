@@ -227,3 +227,10 @@ EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "True").lower() == "true"
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Shifta <noreply@qwikshifthealth.com>")
+
+# Firebase Cloud Messaging (push notifications)
+# Set to the path of your Firebase service account JSON file
+FIREBASE_CREDENTIALS_PATH = os.environ.get(
+    "FIREBASE_CREDENTIALS_PATH",
+    os.path.join(BASE_DIR, "firebase-credentials.json")
+)

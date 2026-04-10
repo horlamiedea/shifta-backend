@@ -38,7 +38,7 @@ class SendBroadcastService(BaseService):
             )
             
             # Create Notification
-            Notification.objects.create(
+            Notification.send(
                 user=app.professional.user,
                 title=f"Broadcast from {shift.facility.name}",
                 message=message_content,
@@ -54,7 +54,7 @@ class NotificationService(BaseService):
         """
         Send a notification to a user.
         """
-        return Notification.objects.create(
+        return Notification.send(
             user=recipient,
             notification_type=notification_type,
             title=title,

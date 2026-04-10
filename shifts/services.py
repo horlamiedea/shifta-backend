@@ -304,7 +304,7 @@ class ShiftManageApplicationService(BaseService):
                     f"{application.professional.user.last_name}".strip()
                     or application.professional.user.email
                 )
-                Notification.objects.create(
+                Notification.send(
                     user=clash_app.shift.facility.user,
                     title="Applicant No Longer Available",
                     message=(
@@ -316,7 +316,7 @@ class ShiftManageApplicationService(BaseService):
                 )
 
             # Notify the professional about confirmation
-            Notification.objects.create(
+            Notification.send(
                 user=application.professional.user,
                 title="Shift Confirmed",
                 message=(
@@ -371,7 +371,7 @@ class ClockInService(BaseService):
 
         # Notify Facility
         from core.models import Notification
-        Notification.objects.create(
+        Notification.send(
             user=application.shift.facility.user,
             title="Professional Checked In",
             message=f"{user.first_name or user.email} has checked in for '{application.shift.role}'.",
@@ -412,7 +412,7 @@ class ClockOutService(BaseService):
 
         # Notify Facility
         from core.models import Notification
-        Notification.objects.create(
+        Notification.send(
             user=application.shift.facility.user,
             title="Professional Checked Out",
             message=f"{user.first_name or user.email} has checked out of '{application.shift.role}'.",
@@ -444,7 +444,7 @@ class ExtraTimeService(BaseService):
         
         # Notify Facility
         from core.models import Notification
-        Notification.objects.create(
+        Notification.send(
             user=application.shift.facility.user,
             title="Extra Time Request",
             message=f"{user.email} requested {hours}hrs extra time for '{application.shift.role}'.",
@@ -480,7 +480,7 @@ class ExtraTimeService(BaseService):
         
         # Notify Professional
         from core.models import Notification
-        Notification.objects.create(
+        Notification.send(
             user=application.professional.user,
             title="Extra Time Added",
             message=f"{facility.name} added {hours}hrs extra time to your shift.",
@@ -510,7 +510,7 @@ class ExtraTimeService(BaseService):
         
         # Notify Professional
         from core.models import Notification
-        Notification.objects.create(
+        Notification.send(
             user=request.shift_application.professional.user,
             title="Extra Time Approved",
             message=f"Your request for {request.hours}hrs extra time has been approved.",

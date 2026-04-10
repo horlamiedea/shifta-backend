@@ -71,7 +71,7 @@ def auto_promote_from_backlog(shift):
 
         pro_name = _pro_display_name(candidate.professional)
 
-        Notification.objects.create(
+        Notification.send(
             user=candidate.professional.user,
             title="Shift Confirmed — You're In!",
             message=(
@@ -96,7 +96,7 @@ def auto_promote_from_backlog(shift):
         for clash_app in clashing:
             clash_app.status = 'REJECTED'
             clash_app.save(update_fields=['status', 'updated_at'])
-            Notification.objects.create(
+            Notification.send(
                 user=clash_app.shift.facility.user,
                 title="Applicant No Longer Available",
                 message=(
@@ -196,7 +196,7 @@ class FacilityCancelShiftService(BaseService):
 
         # Notify the professional
         pro_name = _pro_display_name(application.professional)
-        Notification.objects.create(
+        Notification.send(
             user=application.professional.user,
             title="Shift Cancelled by Facility",
             message=(
@@ -298,7 +298,7 @@ class ProfessionalCancelShiftService(BaseService):
         # Notify facility
         pro_name = _pro_display_name(application.professional)
         urgency = " ⚠️ URGENT —" if tier_label == "last-minute" else ""
-        Notification.objects.create(
+        Notification.send(
             user=shift.facility.user,
             title=f"{urgency} Professional Cancelled Shift",
             message=(
@@ -318,7 +318,7 @@ class ProfessionalCancelShiftService(BaseService):
         promoted = auto_promote_from_backlog(shift)
         if promoted:
             promo_name = _pro_display_name(promoted.professional)
-            Notification.objects.create(
+            Notification.send(
                 user=shift.facility.user,
                 title="Backlog Professional Auto-Confirmed",
                 message=(

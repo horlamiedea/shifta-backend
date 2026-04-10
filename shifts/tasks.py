@@ -54,7 +54,7 @@ def notify_matching_professionals(shift_id):
     matching_pros.sort(key=lambda p: p.professional_score, reverse=True)
 
     for pro in matching_pros:
-        Notification.objects.create(
+        Notification.send(
             user=pro.user,
             title="New Shift Available",
             message=(
@@ -65,7 +65,6 @@ def notify_matching_professionals(shift_id):
             related_object_id=shift.id,
             data={"shift_id": str(shift.id)},
         )
-        # TODO: Send push notification / SMS when integrated
         print(f"Notified {pro.user.email} (score={pro.professional_score})")
 
 
@@ -131,7 +130,7 @@ def close_expired_shifts():
 
         refresh_professional_stats(app.professional)
 
-        Notification.objects.create(
+        Notification.send(
             user=app.professional.user,
             title="Shift Auto-Completed",
             message=(
