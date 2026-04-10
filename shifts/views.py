@@ -287,17 +287,24 @@ class ShiftDetailView(APIView):
             name='ShiftApplicantsResponse',
             many=True,
             fields={
-                'id': serializers.IntegerField(),
+                'id': serializers.UUIDField(),
                 'professional_name': serializers.CharField(),
                 'professional_email': serializers.EmailField(),
+                'professional_phone': serializers.CharField(allow_null=True),
+                'professional_license': serializers.CharField(allow_null=True),
+                'professional_specialties': serializers.ListField(child=serializers.CharField()),
+                'professional_is_verified': serializers.BooleanField(),
                 'status': serializers.CharField(),
                 'applied_at': serializers.DateTimeField(),
-                'clock_in_time': serializers.DateTimeField(required=False),
-                'clock_out_time': serializers.DateTimeField(required=False),
+                'clock_in_time': serializers.DateTimeField(allow_null=True),
+                'clock_out_time': serializers.DateTimeField(allow_null=True),
+                'check_in_code': serializers.CharField(allow_null=True),
+                'check_out_code': serializers.CharField(allow_null=True),
             }
         ),
         403: inline_serializer(name='ApplicantsPermissionError', fields={'error': serializers.CharField()})
-    }
+    },
+    description='List all applications for a shift with professional profile details.',
 )
 @route("shifts/<uuid:shift_id>/applicants/", name="shift-applicants")
 class ShiftApplicantsView(APIView):
@@ -312,6 +319,10 @@ class ShiftApplicantsView(APIView):
                 "id": app.id,
                 "professional_name": f"{app.professional.user.first_name} {app.professional.user.last_name}".strip() or app.professional.user.email,
                 "professional_email": app.professional.user.email,
+                "professional_phone": app.professional.user.phone_number or None,
+                "professional_license": app.professional.license_number or None,
+                "professional_specialties": app.professional.specialties or [],
+                "professional_is_verified": app.professional.is_verified,
                 "status": app.status,
                 "applied_at": app.created_at,
                 "clock_in_time": app.clock_in_time,
@@ -662,6 +673,10 @@ class FacilityPendingApplicationsView(APIView):
                 "id": str(app.id),
                 "professional_name": f"{app.professional.user.first_name} {app.professional.user.last_name}".strip() or app.professional.user.email,
                 "professional_email": app.professional.user.email,
+                "professional_phone": app.professional.user.phone_number or None,
+                "professional_license": app.professional.license_number or None,
+                "professional_specialties": app.professional.specialties or [],
+                "professional_is_verified": app.professional.is_verified,
                 "shift_id": str(app.shift.id),
                 "shift_role": app.shift.role,
                 "shift_specialty": app.shift.specialty,
