@@ -7,7 +7,8 @@
       "Bash(python -c \"from shifts.views import ShiftDetailView; print\\('OK'\\)\")",
       "Bash(DJANGO_SETTINGS_MODULE=shifta_project.settings python -c \"import django; django.setup\\(\\); from shifts.views import ShiftDetailView; print\\('OK'\\)\")",
       "Bash(DJANGO_SETTINGS_MODULE=shifta_project.settings python -c \"import django; django.setup\\(\\); from shifts.views import FacilityPendingApplicationsView; print\\('OK'\\)\")",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(DJANGO_SETTINGS_MODULE=shifta_project.settings python -c \"import django; django.setup\\(\\); from shifts.services import ClockInService; print\\('OK'\\)\")"
     ]
   }
 }

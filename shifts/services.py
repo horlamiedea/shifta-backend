@@ -239,6 +239,14 @@ class ClockInService(BaseService):
         except ShiftApplication.DoesNotExist:
             raise ValueError("No confirmed application for this shift.")
 
+        # Prevent clocking in if already on an active shift
+        active_shift = ShiftApplication.objects.filter(
+            professional=user.professional,
+            status='IN_PROGRESS'
+        ).exists()
+        if active_shift:
+            raise ValueError("You are already clocked into another shift. Please clock out first.")
+
         # Validate check-in code
         if not application.check_in_code:
             raise ValueError("No check-in code assigned. Contact the facility.")

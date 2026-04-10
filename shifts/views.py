@@ -42,13 +42,21 @@ class ShiftListCreateView(APIView):
         data = [{
             "id": str(s.id),
             "facility": s.facility.name,
+            "facility_name": s.facility.name,
             "role": s.role,
             "specialty": s.specialty,
+            "quantity_needed": s.quantity_needed,
+            "quantity_filled": s.quantity_filled,
             "start_time": s.start_time,
+            "end_time": s.end_time,
             "rate": s.rate,
+            "status": s.status,
+            "is_negotiable": s.is_negotiable,
+            "min_rate": s.min_rate,
             "address": s.address,
             "latitude": s.latitude,
-            "longitude": s.longitude
+            "longitude": s.longitude,
+            "created_at": s.created_at,
         } for s in shifts]
         
         return Response(data)
