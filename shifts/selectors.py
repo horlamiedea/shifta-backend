@@ -6,7 +6,7 @@ class ShiftSelector(BaseSelector):
         qs = Shift.objects.filter(status='OPEN')
         if specialty:
             qs = qs.filter(specialty=specialty)
-        return qs
+        return qs.order_by('-created_at')
 
     def list_facility_shifts(self, facility, status=None):
         qs = Shift.objects.filter(facility=facility)
