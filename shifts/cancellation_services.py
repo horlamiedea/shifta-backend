@@ -334,6 +334,258 @@ class ProfessionalCancelShiftService(BaseService):
 
 
 # ---------------------------------------------------------------------------
+# Facility deletes an entire shift (only before it has started)
+# ---------------------------------------------------------------------------
+
+class FacilityDeleteShiftService(BaseService):
+    """
+    Delete a shift entirely. Only allowed if the shift has not started yet.
+    - All PENDING applications are rejected
+    - All CONFIRMED applications are cancelled with full compensation
+    - Remaining budget (unfilled slots) refunded to facility
+    """
+
+    @transaction.atomic
+    def __call__(self, user, shift_id, reason=''):
+        if not user.is_facility:
+            raise PermissionError("Only facilities can delete shifts.")
+
+        shift = Shift.objects.select_for_update().get(id=shift_id)
+        if shift.facility != user.facility:
+            raise PermissionError("Not your shift.")
+
+        if shift.status in ('COMPLETED', 'CANCELLED'):
+            raise ValueError("This shift is already completed or cancelled.")
+
+        now = timezone.now()
+        if shift.start_time <= now:
+            raise ValueError("Cannot delete a shift that has already started. Use 'End Shift' instead.")
+
+        # Check for any IN_PROGRESS applications
+        if ShiftApplication.objects.filter(shift=shift, status='IN_PROGRESS').exists():
+            raise ValueError("Cannot delete a shift with active professionals. Use 'End Shift' instead.")
+
+        duration_hours = (shift.end_time - shift.start_time).total_seconds() / 3600
+        cost_per_slot = shift.rate * Decimal(str(duration_hours))
+
+        # Cancel all CONFIRMED applications — full compensation since facility chose to delete
+        confirmed_apps = ShiftApplication.objects.filter(
+            shift=shift, status='CONFIRMED'
+        ).select_related('professional__user')
+
+        for app in confirmed_apps:
+            compensation = cost_per_slot * Decimal('0.40')  # 40% comp for deletion
+
+            app.professional.wallet_balance += compensation
+            app.professional.save(update_fields=['wallet_balance'])
+
+            Transaction.objects.create(
+                user=app.professional.user, amount=compensation,
+                transaction_type='PAYOUT', reference=str(uuid.uuid4()),
+                status='SUCCESS', shift=shift,
+            )
+
+            app.status = 'CANCELLED'
+            app.cancelled_by = 'FACILITY'
+            app.cancellation_reason = reason or 'Shift deleted by facility'
+            app.save()
+
+            Notification.send(
+                user=app.professional.user,
+                title="Shift Deleted by Facility",
+                message=(
+                    f"The shift '{shift.role}' at {shift.facility.name} has been deleted. "
+                    f"You have been compensated ₦{compensation:,.2f}."
+                ),
+                notification_type="CANCELLED",
+                related_object_id=app.id,
+            )
+
+        # Reject all PENDING applications
+        pending_apps = ShiftApplication.objects.filter(shift=shift, status='PENDING')
+        for app in pending_apps:
+            app.status = 'REJECTED'
+            app.cancellation_reason = 'Shift deleted by facility'
+            app.save(update_fields=['status', 'cancellation_reason', 'updated_at'])
+
+        # Refund remaining budget to facility
+        total_confirmed_comp = cost_per_slot * Decimal('0.40') * confirmed_apps.count()
+        total_original_cost = cost_per_slot * shift.quantity_needed
+        refund = total_original_cost - total_confirmed_comp
+        if refund > 0:
+            shift.facility.wallet_balance += refund
+            shift.facility.save(update_fields=['wallet_balance'])
+
+            Transaction.objects.create(
+                user=user, amount=refund,
+                transaction_type='REFUND', reference=str(uuid.uuid4()),
+                status='SUCCESS', shift=shift,
+            )
+
+        shift.status = 'CANCELLED'
+        shift.save(update_fields=['status', 'updated_at'])
+
+        return {
+            "status": "success",
+            "message": f"Shift deleted. Refund: ₦{refund:,.2f}. "
+                       f"{confirmed_apps.count()} confirmed professional(s) compensated."
+        }
+
+
+# ---------------------------------------------------------------------------
+# Facility ends a shift early (shift already in progress)
+# ---------------------------------------------------------------------------
+
+class FacilityEndShiftEarlyService(BaseService):
+    """
+    End an active shift early. Professionals are paid for hours worked.
+    If hours worked < 60% of total scheduled hours, an extra 20% bonus is added.
+    """
+
+    @transaction.atomic
+    def __call__(self, user, shift_id, reason=''):
+        if not user.is_facility:
+            raise PermissionError("Only facilities can end shifts.")
+
+        shift = Shift.objects.select_for_update().get(id=shift_id)
+        if shift.facility != user.facility:
+            raise PermissionError("Not your shift.")
+
+        now = timezone.now()
+        if shift.start_time > now:
+            raise ValueError("This shift hasn't started yet. Use 'Delete Shift' instead.")
+
+        if shift.status in ('COMPLETED', 'CANCELLED'):
+            raise ValueError("This shift is already completed or cancelled.")
+
+        scheduled_hours = (shift.end_time - shift.start_time).total_seconds() / 3600
+        payout_details = []
+
+        # Process IN_PROGRESS applications (professionals currently working)
+        active_apps = ShiftApplication.objects.filter(
+            shift=shift, status='IN_PROGRESS'
+        ).select_related('professional__user')
+
+        for app in active_apps:
+            clock_in = app.clock_in_time or shift.start_time
+            worked_hours = max((now - clock_in).total_seconds() / 3600, 0)
+            worked_pct = worked_hours / scheduled_hours if scheduled_hours > 0 else 1
+
+            base_pay = shift.rate * Decimal(str(worked_hours))
+
+            # Bonus: if worked less than 60% of scheduled time, add 20% bonus
+            if worked_pct < 0.60:
+                bonus = base_pay * Decimal('0.20')
+            else:
+                bonus = Decimal('0')
+
+            total_pay = base_pay + bonus
+
+            # Pay professional
+            app.professional.wallet_balance += total_pay
+            app.professional.save(update_fields=['wallet_balance'])
+
+            Transaction.objects.create(
+                user=app.professional.user, amount=total_pay,
+                transaction_type='PAYOUT', reference=str(uuid.uuid4()),
+                status='SUCCESS', shift=shift,
+            )
+
+            # Complete the application
+            app.clock_out_time = now
+            app.status = 'COMPLETED'
+            app.save(update_fields=['status', 'clock_out_time', 'updated_at'])
+
+            bonus_note = f" (includes 20% early-end bonus)" if bonus > 0 else ""
+            Notification.send(
+                user=app.professional.user,
+                title="Shift Ended Early by Facility",
+                message=(
+                    f"The shift '{shift.role}' at {shift.facility.name} has been ended early. "
+                    f"You've been paid ₦{total_pay:,.2f} for {worked_hours:.1f} hours{bonus_note}."
+                ),
+                notification_type="SHIFT_APPROVED",
+                related_object_id=app.id,
+            )
+
+            payout_details.append({
+                "professional": app.professional.user.email,
+                "hours_worked": round(worked_hours, 2),
+                "base_pay": str(base_pay),
+                "bonus": str(bonus),
+                "total_pay": str(total_pay),
+            })
+
+        # Cancel CONFIRMED applications that haven't clocked in yet — 40% compensation
+        confirmed_apps = ShiftApplication.objects.filter(
+            shift=shift, status='CONFIRMED'
+        ).select_related('professional__user')
+
+        for app in confirmed_apps:
+            cost = shift.rate * Decimal(str(scheduled_hours))
+            compensation = cost * Decimal('0.40')
+
+            app.professional.wallet_balance += compensation
+            app.professional.save(update_fields=['wallet_balance'])
+
+            Transaction.objects.create(
+                user=app.professional.user, amount=compensation,
+                transaction_type='PAYOUT', reference=str(uuid.uuid4()),
+                status='SUCCESS', shift=shift,
+            )
+
+            app.status = 'CANCELLED'
+            app.cancelled_by = 'FACILITY'
+            app.cancellation_reason = reason or 'Shift ended early by facility'
+            app.save()
+
+            Notification.send(
+                user=app.professional.user,
+                title="Shift Ended Early",
+                message=(
+                    f"The shift '{shift.role}' at {shift.facility.name} was ended early before "
+                    f"you clocked in. You've been compensated ₦{compensation:,.2f}."
+                ),
+                notification_type="CANCELLED",
+                related_object_id=app.id,
+            )
+
+        # Reject remaining PENDING
+        ShiftApplication.objects.filter(
+            shift=shift, status='PENDING'
+        ).update(status='REJECTED')
+
+        # Calculate facility refund (unused portion)
+        total_original_cost = shift.rate * Decimal(str(scheduled_hours)) * shift.quantity_needed
+        total_paid_out = sum(Decimal(p['total_pay']) for p in payout_details)
+        total_confirmed_comp = sum(
+            shift.rate * Decimal(str(scheduled_hours)) * Decimal('0.40')
+            for _ in confirmed_apps
+        )
+        total_spent = total_paid_out + total_confirmed_comp
+        refund = total_original_cost - total_spent
+        if refund > 0:
+            shift.facility.wallet_balance += refund
+            shift.facility.save(update_fields=['wallet_balance'])
+
+            Transaction.objects.create(
+                user=user, amount=refund,
+                transaction_type='REFUND', reference=str(uuid.uuid4()),
+                status='SUCCESS', shift=shift,
+            )
+
+        shift.status = 'COMPLETED'
+        shift.save(update_fields=['status', 'updated_at'])
+
+        return {
+            "status": "success",
+            "message": f"Shift ended early. {len(payout_details)} professional(s) paid. "
+                       f"Refund: ₦{refund:,.2f}.",
+            "payouts": payout_details,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

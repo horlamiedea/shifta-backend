@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from core.router import route
 from .services import ShiftCreateService, ShiftUpdateService, ShiftApplyService, ShiftManageApplicationService, ClockInService, ClockOutService, ExtraTimeService
-from .cancellation_services import FacilityCancelShiftService, ProfessionalCancelShiftService
+from .cancellation_services import FacilityCancelShiftService, ProfessionalCancelShiftService, FacilityDeleteShiftService, FacilityEndShiftEarlyService
 from .approval_services import ApproveShiftStartService
 from .selectors import ShiftSelector
 from .models import ShiftApplication
@@ -567,6 +567,39 @@ class ShiftCancelView(APIView):
             return Response({"error": str(e)}, status=403)
         except ValueError as e:
             return Response({"error": str(e)}, status=400)
+
+
+@route("shifts/<uuid:shift_id>/delete/", name="shift-delete")
+class ShiftDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, shift_id):
+        reason = request.data.get("reason", "")
+        try:
+            service = FacilityDeleteShiftService()
+            result = service(user=request.user, shift_id=shift_id, reason=reason)
+            return Response(result)
+        except PermissionError as e:
+            return Response({"error": str(e)}, status=403)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+
+
+@route("shifts/<uuid:shift_id>/end/", name="shift-end-early")
+class ShiftEndEarlyView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, shift_id):
+        reason = request.data.get("reason", "")
+        try:
+            service = FacilityEndShiftEarlyService()
+            result = service(user=request.user, shift_id=shift_id, reason=reason)
+            return Response(result)
+        except PermissionError as e:
+            return Response({"error": str(e)}, status=403)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+
 
 @extend_schema(
     responses={
