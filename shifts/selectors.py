@@ -45,3 +45,11 @@ class ShiftSelector(BaseSelector):
             )
             
         return qs.distinct()
+
+    def list_facility_pending_applications(self, facility):
+        return (
+            ShiftApplication.objects
+            .filter(shift__facility=facility, status='PENDING')
+            .select_related('shift', 'professional__user')
+            .order_by('-created_at')
+        )

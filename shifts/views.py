@@ -618,6 +618,56 @@ class FacilityDashboardStatsView(APIView):
 @extend_schema(
     responses={
         200: inline_serializer(
+            name='FacilityPendingApplicationsResponse',
+            many=True,
+            fields={
+                'id': serializers.UUIDField(),
+                'professional_name': serializers.CharField(),
+                'professional_email': serializers.EmailField(),
+                'shift_id': serializers.UUIDField(),
+                'shift_role': serializers.CharField(),
+                'shift_specialty': serializers.CharField(),
+                'shift_start_time': serializers.DateTimeField(),
+                'shift_end_time': serializers.DateTimeField(),
+                'shift_rate': serializers.DecimalField(max_digits=10, decimal_places=2),
+                'applied_at': serializers.DateTimeField(),
+            }
+        ),
+        403: inline_serializer(name='PendingAppsPermissionError', fields={'error': serializers.CharField()})
+    },
+    description='List all pending applications across all facility shifts.',
+)
+@route("facility/applications/pending/", name="facility-pending-applications")
+class FacilityPendingApplicationsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.is_facility:
+            return Response({"error": "Only facilities can view pending applications"}, status=403)
+
+        selector = ShiftSelector()
+        applications = selector.list_facility_pending_applications(request.user.facility)
+
+        data = []
+        for app in applications:
+            data.append({
+                "id": str(app.id),
+                "professional_name": f"{app.professional.user.first_name} {app.professional.user.last_name}".strip() or app.professional.user.email,
+                "professional_email": app.professional.user.email,
+                "shift_id": str(app.shift.id),
+                "shift_role": app.shift.role,
+                "shift_specialty": app.shift.specialty,
+                "shift_start_time": app.shift.start_time,
+                "shift_end_time": app.shift.end_time,
+                "shift_rate": app.shift.rate,
+                "applied_at": app.created_at,
+            })
+
+        return Response(data)
+
+@extend_schema(
+    responses={
+        200: inline_serializer(
             name='ProfessionalShiftListResponse',
             many=True,
             fields={
