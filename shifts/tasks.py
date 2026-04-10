@@ -45,7 +45,7 @@ def notify_matching_professionals(shift_id):
             pro.current_location_lat, pro.current_location_lng,
             target_lat, target_lng,
         )
-        if dist > 20:
+        if dist > 50:
             continue
 
         has_clash = ShiftApplication.objects.filter(
