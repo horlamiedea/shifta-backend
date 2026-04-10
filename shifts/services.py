@@ -8,14 +8,20 @@ from decimal import Decimal
 class ShiftCreateService(BaseService):
     @transaction.atomic
     def __call__(self, user, role, specialty, quantity_needed, start_time, end_time, rate, is_negotiable=False, min_rate=None, address=None, latitude=None, longitude=None):
+        from django.utils import timezone
+
         if not user.is_facility:
             raise PermissionError("Only facilities can create shifts.")
-        
+
         facility = user.facility
-        
+
         if not facility.is_verified:
             raise PermissionError("Facility must be verified to create shifts. Please upload your documents.")
-        
+
+        # Start time must be in the future
+        if start_time <= timezone.now():
+            raise ValueError("Start time must be in the future.")
+
         # Cost Calculation & Deduction (Phase 2)
         # Duration in hours
         duration = (end_time - start_time).total_seconds() / 3600
@@ -102,6 +108,8 @@ class ShiftUpdateService(BaseService):
 
     @transaction.atomic
     def __call__(self, user, shift_id, **kwargs):
+        from django.utils import timezone
+
         if not user.is_facility:
             raise PermissionError("Only facilities can edit shifts.")
 
@@ -111,6 +119,29 @@ class ShiftUpdateService(BaseService):
 
         if shift.status not in ('OPEN', 'FILLED'):
             raise ValueError("Only OPEN or FILLED shifts can be edited.")
+
+        now = timezone.now()
+
+        # Block edits once the shift has started
+        if shift.start_time <= now:
+            raise ValueError("This shift has already started and cannot be edited.")
+
+        # Block edits if any professional is already IN_PROGRESS
+        has_active = ShiftApplication.objects.filter(
+            shift=shift, status='IN_PROGRESS'
+        ).exists()
+        if has_active:
+            raise ValueError("This shift has active professionals and cannot be edited.")
+
+        # For FILLED shifts, only allow increasing quantity (professionals already agreed to terms)
+        if shift.status == 'FILLED':
+            restricted = {'start_time', 'end_time', 'rate', 'min_rate'}
+            changing_restricted = {k for k in restricted if k in kwargs and kwargs[k] is not None}
+            if changing_restricted:
+                raise ValueError(
+                    "Cannot change time or rate on a filled shift — professionals have already been confirmed. "
+                    "You can only increase the number of professionals needed."
+                )
 
         # Track what changed for wallet adjustments
         old_quantity = shift.quantity_needed
@@ -128,6 +159,10 @@ class ShiftUpdateService(BaseService):
         new_duration = (shift.end_time - shift.start_time).total_seconds() / 3600
         if new_duration <= 0:
             raise ValueError("End time must be after start time.")
+
+        # New times must be in the future
+        if shift.start_time <= now:
+            raise ValueError("Start time must be in the future.")
 
         # Cannot reduce quantity below already filled
         if shift.quantity_needed < shift.quantity_filled:
@@ -165,6 +200,8 @@ class ShiftUpdateService(BaseService):
 
 class ShiftApplyService(BaseService):
     def __call__(self, user, shift_id):
+        from django.utils import timezone
+
         if not user.is_professional:
             raise PermissionError("Only professionals can apply.")
 
@@ -172,6 +209,10 @@ class ShiftApplyService(BaseService):
         # Allow applying to OPEN or FILLED shifts (backlog)
         if shift.status not in ('OPEN', 'FILLED'):
             raise ValueError("This shift is no longer accepting applications.")
+
+        # Cannot apply to a shift that has already started
+        if shift.start_time <= timezone.now():
+            raise ValueError("This shift has already started and is no longer accepting applications.")
 
         if ShiftApplication.objects.filter(shift=shift, professional=user.professional).exists():
             raise ValueError("Already applied.")
@@ -196,6 +237,8 @@ class ShiftApplyService(BaseService):
 class ShiftManageApplicationService(BaseService):
     @transaction.atomic
     def __call__(self, user, application_id, action):
+        from django.utils import timezone
+
         if not user.is_facility:
             raise PermissionError("Only facilities can manage applications.")
 
@@ -207,6 +250,10 @@ class ShiftManageApplicationService(BaseService):
 
         if action == 'CONFIRM':
             shift = application.shift
+
+            # Cannot confirm after shift has started
+            if shift.start_time <= timezone.now():
+                raise ValueError("This shift has already started. You can no longer confirm applicants.")
 
             if shift.quantity_filled >= shift.quantity_needed:
                 raise ValueError("Shift is already filled.")

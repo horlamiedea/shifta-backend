@@ -15,7 +15,12 @@
       "Bash(python -c \"from shifts.services import ShiftManageApplicationService; from shifts.cancellation_services import auto_promote_from_backlog, FacilityCancelShiftService, ProfessionalCancelShiftService; from shifts.emails import send_shift_promotion_email, send_shift_confirmed_email; from shifts.selectors import ShiftSelector; from shifts.views import ShiftListCreateView, ProfessionalShiftListView, FacilityPendingApplicationsView; print\\('All imports OK'\\)\")",
       "Bash(python manage.py check)",
       "Bash(python manage.py makemigrations)",
-      "Bash(python manage.py migrate)"
+      "Bash(python manage.py migrate)",
+      "Bash(identify /Users/olamideajayi/Developers/shifta-frontend/app/favicon.ico)",
+      "Bash(python3 -c \"from PIL import Image; print\\('Pillow available'\\)\")",
+      "Bash(python3)",
+      "Bash(dart run:*)",
+      "Bash(python manage.py backfill_codes)"
     ]
   }
 }
