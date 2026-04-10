@@ -9,6 +9,7 @@ class ShiftCreateService(BaseService):
     @transaction.atomic
     def __call__(self, user, role, specialty, quantity_needed, start_time, end_time, rate, is_negotiable=False, min_rate=None, address=None, latitude=None, longitude=None):
         from django.utils import timezone
+        from django.utils.timezone import make_aware, is_naive
 
         if not user.is_facility:
             raise PermissionError("Only facilities can create shifts.")
@@ -17,6 +18,12 @@ class ShiftCreateService(BaseService):
 
         if not facility.is_verified:
             raise PermissionError("Facility must be verified to create shifts. Please upload your documents.")
+
+        # Ensure datetimes are timezone-aware
+        if is_naive(start_time):
+            start_time = make_aware(start_time)
+        if is_naive(end_time):
+            end_time = make_aware(end_time)
 
         # Start time must be in the future
         if start_time <= timezone.now():
@@ -109,6 +116,7 @@ class ShiftUpdateService(BaseService):
     @transaction.atomic
     def __call__(self, user, shift_id, **kwargs):
         from django.utils import timezone
+        from django.utils.timezone import make_aware, is_naive
 
         if not user.is_facility:
             raise PermissionError("Only facilities can edit shifts.")
@@ -149,6 +157,11 @@ class ShiftUpdateService(BaseService):
         old_start = shift.start_time
         old_end = shift.end_time
         old_duration = (old_end - old_start).total_seconds() / 3600
+
+        # Ensure any incoming datetimes are timezone-aware
+        for dt_field in ('start_time', 'end_time'):
+            if dt_field in kwargs and kwargs[dt_field] is not None and is_naive(kwargs[dt_field]):
+                kwargs[dt_field] = make_aware(kwargs[dt_field])
 
         # Apply allowed field updates
         allowed_fields = ['quantity_needed', 'start_time', 'end_time', 'rate', 'is_negotiable', 'min_rate']
