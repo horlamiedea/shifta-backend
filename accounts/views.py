@@ -161,22 +161,45 @@ class ProfileView(APIView):
     )
     def put(self, request):
         user = request.user
-        # Only professionals for now based on Epic 2
+
+        # Update common user fields
+        first_name = request.data.get("first_name")
+        last_name = request.data.get("last_name")
+        phone_number = request.data.get("phone_number")
+        if first_name is not None:
+            user.first_name = first_name
+        if last_name is not None:
+            user.last_name = last_name
+        if phone_number is not None:
+            user.phone_number = phone_number
+        user.save()
+
         if user.is_professional:
             specialties = request.data.get("specialties")
             location_lat = request.data.get("location_lat")
             location_lng = request.data.get("location_lng")
             cv_url = request.data.get("cv_url")
             certificate_url = request.data.get("certificate_url")
-            
+
             service = ProfessionalUpdateService()
             try:
                 service(user=user, specialties=specialties, location_lat=location_lat, location_lng=location_lng, cv_url=cv_url, certificate_url=certificate_url)
                 return Response({"status": "updated"})
             except ValueError as e:
                 return Response({"error": str(e)}, status=400)
-        
-        return Response({"status": "not implemented for this user type"}, status=400)
+
+        elif user.is_facility:
+            facility = user.facility
+            name = request.data.get("name")
+            address = request.data.get("address")
+            if name is not None:
+                facility.name = name
+            if address is not None:
+                facility.address = address
+            facility.save()
+            return Response({"status": "updated"})
+
+        return Response({"status": "updated"})
 
 
 @extend_schema(

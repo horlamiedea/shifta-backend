@@ -97,6 +97,72 @@ class ShiftCreateService(BaseService):
         return shift
 
 
+class ShiftUpdateService(BaseService):
+    """Allows a facility to edit an OPEN or FILLED shift (quantity, dates, rate)."""
+
+    @transaction.atomic
+    def __call__(self, user, shift_id, **kwargs):
+        if not user.is_facility:
+            raise PermissionError("Only facilities can edit shifts.")
+
+        shift = Shift.objects.select_for_update().get(id=shift_id)
+        if shift.facility != user.facility:
+            raise PermissionError("Not your shift.")
+
+        if shift.status not in ('OPEN', 'FILLED'):
+            raise ValueError("Only OPEN or FILLED shifts can be edited.")
+
+        # Track what changed for wallet adjustments
+        old_quantity = shift.quantity_needed
+        old_rate = shift.rate
+        old_start = shift.start_time
+        old_end = shift.end_time
+        old_duration = (old_end - old_start).total_seconds() / 3600
+
+        # Apply allowed field updates
+        allowed_fields = ['quantity_needed', 'start_time', 'end_time', 'rate', 'is_negotiable', 'min_rate']
+        for field in allowed_fields:
+            if field in kwargs and kwargs[field] is not None:
+                setattr(shift, field, kwargs[field])
+
+        new_duration = (shift.end_time - shift.start_time).total_seconds() / 3600
+        if new_duration <= 0:
+            raise ValueError("End time must be after start time.")
+
+        # Cannot reduce quantity below already filled
+        if shift.quantity_needed < shift.quantity_filled:
+            raise ValueError(
+                f"Cannot reduce quantity below {shift.quantity_filled} (already filled)."
+            )
+
+        # Re-open if quantity increased and was previously FILLED
+        if shift.status == 'FILLED' and shift.quantity_needed > shift.quantity_filled:
+            shift.status = 'OPEN'
+
+        # Wallet adjustment: charge or refund the difference
+        facility = shift.facility
+        old_total = old_rate * Decimal(str(old_duration)) * old_quantity
+        new_total = shift.rate * Decimal(str(new_duration)) * shift.quantity_needed
+        diff = new_total - old_total
+
+        if diff > 0:
+            # Additional charge
+            if facility.wallet_balance < diff:
+                raise ValueError(
+                    f"Insufficient balance for this change. Additional ₦{diff} required, "
+                    f"available: ₦{facility.wallet_balance}"
+                )
+            facility.wallet_balance -= diff
+            facility.save(update_fields=['wallet_balance'])
+        elif diff < 0:
+            # Refund the difference
+            facility.wallet_balance += abs(diff)
+            facility.save(update_fields=['wallet_balance'])
+
+        shift.save()
+        return shift
+
+
 class ShiftApplyService(BaseService):
     def __call__(self, user, shift_id):
         if not user.is_professional:

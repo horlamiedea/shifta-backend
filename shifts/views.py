@@ -2,7 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from core.router import route
-from .services import ShiftCreateService, ShiftApplyService, ShiftManageApplicationService, ClockInService, ClockOutService, ExtraTimeService
+from .services import ShiftCreateService, ShiftUpdateService, ShiftApplyService, ShiftManageApplicationService, ClockInService, ClockOutService, ExtraTimeService
 from .cancellation_services import FacilityCancelShiftService, ProfessionalCancelShiftService
 from .approval_services import ApproveShiftStartService
 from .selectors import ShiftSelector
@@ -167,30 +167,110 @@ class ShiftListCreateView(APIView):
 class ShiftDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
+    def _serialize_shift(self, shift):
+        return {
+            "id": str(shift.id),
+            "facility": shift.facility.name,
+            "role": shift.role,
+            "specialty": shift.specialty,
+            "quantity_needed": shift.quantity_needed,
+            "quantity_filled": shift.quantity_filled,
+            "start_time": shift.start_time,
+            "end_time": shift.end_time,
+            "rate": shift.rate,
+            "status": shift.status,
+            "is_negotiable": shift.is_negotiable,
+            "min_rate": shift.min_rate,
+            "address": shift.address,
+            "latitude": shift.latitude,
+            "longitude": shift.longitude,
+        }
+
     def get(self, request, shift_id):
         try:
             selector = ShiftSelector()
             shift = selector.get_shift(shift_id)
-            
-            data = {
-                "id": str(shift.id),
-                "facility": shift.facility.name,
-                "role": shift.role,
-                "specialty": shift.specialty,
-                "quantity_needed": shift.quantity_needed,
-                "quantity_filled": shift.quantity_filled,
-                "start_time": shift.start_time,
-                "end_time": shift.end_time,
-                "rate": shift.rate,
-                "status": shift.status,
-                "is_negotiable": shift.is_negotiable,
-                "min_rate": shift.min_rate,
-                "address": shift.address,
-                "latitude": shift.latitude,
-                "longitude": shift.longitude,
-            }
-            return Response(data)
+            return Response(self._serialize_shift(shift))
         except Exception as e:
+            return Response({"error": "Shift not found"}, status=404)
+
+    @extend_schema(
+        request=inline_serializer(
+            name='ShiftUpdateRequest',
+            fields={
+                'quantity_needed': serializers.IntegerField(required=False),
+                'start_time': serializers.DateTimeField(required=False),
+                'end_time': serializers.DateTimeField(required=False),
+                'rate': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
+                'is_negotiable': serializers.BooleanField(required=False),
+                'min_rate': serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True),
+            }
+        ),
+        responses={
+            200: inline_serializer(
+                name='ShiftUpdateResponse',
+                fields={
+                    'id': serializers.UUIDField(),
+                    'facility': serializers.CharField(),
+                    'role': serializers.CharField(),
+                    'specialty': serializers.CharField(),
+                    'quantity_needed': serializers.IntegerField(),
+                    'quantity_filled': serializers.IntegerField(),
+                    'start_time': serializers.DateTimeField(),
+                    'end_time': serializers.DateTimeField(),
+                    'rate': serializers.DecimalField(max_digits=10, decimal_places=2),
+                    'status': serializers.CharField(),
+                    'is_negotiable': serializers.BooleanField(),
+                    'min_rate': serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True),
+                    'address': serializers.CharField(allow_null=True),
+                    'latitude': serializers.FloatField(allow_null=True),
+                    'longitude': serializers.FloatField(allow_null=True),
+                }
+            ),
+            400: inline_serializer(name='ShiftUpdateValidationError', fields={'error': serializers.CharField()}),
+            403: inline_serializer(name='ShiftUpdatePermissionError', fields={'error': serializers.CharField()}),
+            404: inline_serializer(name='ShiftUpdateNotFoundError', fields={'error': serializers.CharField()}),
+        },
+        description='Update an open or filled shift. Adjusts wallet balance if rate or quantity changes.',
+    )
+    def patch(self, request, shift_id):
+        from datetime import datetime
+        from decimal import Decimal
+
+        service = ShiftUpdateService()
+        kwargs = {}
+
+        # Parse optional fields
+        if 'quantity_needed' in request.data:
+            kwargs['quantity_needed'] = int(request.data['quantity_needed'])
+        if 'start_time' in request.data:
+            st = request.data['start_time']
+            try:
+                kwargs['start_time'] = datetime.fromisoformat(st.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                kwargs['start_time'] = datetime.strptime(st, "%Y-%m-%dT%H:%M")
+        if 'end_time' in request.data:
+            et = request.data['end_time']
+            try:
+                kwargs['end_time'] = datetime.fromisoformat(et.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                kwargs['end_time'] = datetime.strptime(et, "%Y-%m-%dT%H:%M")
+        if 'rate' in request.data:
+            kwargs['rate'] = Decimal(str(request.data['rate']))
+        if 'is_negotiable' in request.data:
+            kwargs['is_negotiable'] = request.data['is_negotiable']
+        if 'min_rate' in request.data:
+            mr = request.data['min_rate']
+            kwargs['min_rate'] = Decimal(str(mr)) if mr is not None else None
+
+        try:
+            shift = service(user=request.user, shift_id=shift_id, **kwargs)
+            return Response(self._serialize_shift(shift))
+        except PermissionError as e:
+            return Response({"error": str(e)}, status=403)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception:
             return Response({"error": "Shift not found"}, status=404)
 
 @extend_schema(
@@ -473,9 +553,10 @@ class FacilityShiftListView(APIView):
     def get(self, request):
         if not request.user.is_facility:
             return Response({"error": "Only facilities can view this."}, status=403)
-            
+
+        status_filter = request.query_params.get('status')
         selector = ShiftSelector()
-        shifts = selector.list_facility_shifts(request.user.facility)
+        shifts = selector.list_facility_shifts(request.user.facility, status=status_filter)
         
         data = [{
             "id": shift.id,

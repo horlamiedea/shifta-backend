@@ -8,8 +8,11 @@ class ShiftSelector(BaseSelector):
             qs = qs.filter(specialty=specialty)
         return qs
 
-    def list_facility_shifts(self, facility):
-        return Shift.objects.filter(facility=facility).order_by('-created_at')
+    def list_facility_shifts(self, facility, status=None):
+        qs = Shift.objects.filter(facility=facility)
+        if status:
+            qs = qs.filter(status=status.upper())
+        return qs.order_by('-created_at')
 
     def list_professional_shifts(self, professional):
         # Return all OPEN shifts - no location or specialty filtering for now

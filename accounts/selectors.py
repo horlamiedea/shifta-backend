@@ -12,6 +12,9 @@ class UserSelector(BaseSelector):
         data = {
             "id": str(user.id),
             "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "phone_number": user.phone_number,
             "is_professional": user.is_professional,
             "is_facility": user.is_facility,
         }
@@ -19,11 +22,12 @@ class UserSelector(BaseSelector):
             data["professional"] = {
                 "license_number": user.professional.license_number,
                 "specialties": user.professional.specialties,
-                "is_verified": user.professional.is_verified
+                "is_verified": user.professional.is_verified,
             }
         if user.is_facility:
             data["facility"] = {
                 "name": user.facility.name,
+                "address": user.facility.address,
                 "rc_number": user.facility.rc_number,
                 "is_verified": user.facility.is_verified,
                 "wallet_balance": str(user.facility.wallet_balance),

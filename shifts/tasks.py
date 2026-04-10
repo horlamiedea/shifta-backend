@@ -1,7 +1,8 @@
 from celery import shared_task
+from django.utils import timezone
 from accounts.models import Professional
 from core.utils import haversine
-from .models import Shift
+from .models import Shift, ShiftApplication
 
 @shared_task
 def notify_matching_professionals(shift_id):
@@ -54,4 +55,39 @@ def notify_matching_professionals(shift_id):
     for pro in matching_pros:
         # Mock sending Push/SMS
         print(f"Sending notification to {pro.user.email}: New shift available at {shift.facility.name}")
+
+
+@shared_task
+def close_expired_open_shifts():
+    """Close OPEN shifts whose end_time has passed."""
+    now = timezone.now()
+
+    expired_shifts = Shift.objects.filter(
+        status='OPEN',
+        end_time__lte=now,
+    )
+
+    count = 0
+    for shift in expired_shifts:
+        shift.status = 'CANCELLED'
+        shift.save(update_fields=['status', 'updated_at'])
+
+        # Refund the facility for unfilled spots
+        unfilled = shift.quantity_needed - shift.quantity_filled
+        if unfilled > 0:
+            duration_hours = (shift.end_time - shift.start_time).total_seconds() / 3600
+            from decimal import Decimal
+            refund = shift.rate * Decimal(str(duration_hours)) * unfilled
+            facility = shift.facility
+            facility.wallet_balance += refund
+            facility.save(update_fields=['wallet_balance'])
+
+        # Reject any remaining PENDING applications
+        ShiftApplication.objects.filter(
+            shift=shift, status='PENDING'
+        ).update(status='REJECTED')
+
+        count += 1
+
+    return f"Closed {count} expired shifts."
 
