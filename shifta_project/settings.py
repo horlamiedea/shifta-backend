@@ -33,7 +33,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://172.203.248.172:3000",
     "http://qwikshifthealth.com:3000",
     "https://shifta-frontend.vercel.app",
-    "102.216.134.3"
+    "http://102.216.134.3:8000/"
 ]
 
 CSRF_TRUSTED_ORIGINS = [
@@ -41,7 +41,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://172.203.248.172:8000",
     "http://qwikshifthealth.com:3000",
     "https://shifta-frontend.vercel.app/",
-    "102.216.134.3"
+    "http://102.216.134.3:8000/"
 ]
 
 
