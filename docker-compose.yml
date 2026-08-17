@@ -1,25 +1,6 @@
 services:
-  # PostgreSQL Database
-  db:
-    image: postgres:16-alpine
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_DB=${DB_NAME}
-      - POSTGRES_USER=${DB_USER}
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
-    # Uncomment to reach the DB from the host (psql, backups) without
-    # exposing it publicly. Never use a bare "5432:5432" on a prod box.
-    # ports:
-    #   - "127.0.0.1:5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
-
   # Django Web Application
+  # Database is Aiven managed PostgreSQL; DB_* comes from .env.
   web:
     build: .
     command: >
@@ -32,18 +13,11 @@ services:
     env_file:
       - .env
     environment:
-      # Overrides DB_HOST/DB_PORT from .env: inside the compose network the
-      # database is reachable at the service name, not localhost.
-      - DB_HOST=db
-      - DB_PORT=5432
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
+      - redis
     restart: unless-stopped
 
   # Redis for Celery broker
@@ -62,16 +36,11 @@ services:
     env_file:
       - .env
     environment:
-      - DB_HOST=db
-      - DB_PORT=5432
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
+      - redis
     restart: unless-stopped
 
   # Celery Beat (Scheduled Tasks)
@@ -83,19 +52,13 @@ services:
     env_file:
       - .env
     environment:
-      - DB_HOST=db
-      - DB_PORT=5432
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
+      - redis
     restart: unless-stopped
 
 volumes:
   redis_data:
-  postgres_data:
 
