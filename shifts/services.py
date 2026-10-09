@@ -3,7 +3,9 @@ from core.services import BaseService
 from core.geocoding import geocoding_service
 from .models import Shift, ShiftApplication
 from .tasks import notify_matching_professionals
+from billing import ledger
 from decimal import Decimal
+import uuid
 
 class ShiftCreateService(BaseService):
     @transaction.atomic
@@ -43,16 +45,12 @@ class ShiftCreateService(BaseService):
 
         # Rate is per hour per professional (as per user requirement: "put the amount for one hour... price will be 30*8")
         # So total_cost = rate * duration * quantity
-        total_cost = rate *  Decimal(duration) * quantity_needed
-        
-        # Check Wallet Balance
+        total_cost = ledger.to_money(rate * Decimal(duration) * quantity_needed)
+
+        # Fail fast before geocoding; ledger.debit re-checks under a row lock.
         if facility.wallet_balance < total_cost:
              raise ValueError(f"Insufficient wallet balance. Required: {total_cost}, Available: {facility.wallet_balance}")
-        
-        # Deduct from Wallet
-        facility.wallet_balance -= total_cost
-        facility.save()
-        
+
         # Handle location - use provided values or fallback to facility location
         shift_address = address
         shift_latitude = latitude
@@ -104,16 +102,10 @@ class ShiftCreateService(BaseService):
             longitude=shift_longitude
         )
 
-        # Record CHARGE transaction for audit trail
-        from billing.models import Transaction
-        import uuid
-        Transaction.objects.create(
-            user=user,
-            amount=total_cost,
-            transaction_type='CHARGE',
-            reference=str(uuid.uuid4()),
-            status='SUCCESS',
-            shift=shift,
+        # Escrow the shift cost. Raises InsufficientFunds (rolling back the
+        # shift) if a concurrent charge spent the balance after the check above.
+        ledger.debit(
+            facility.user, total_cost, 'CHARGE', f"shift-charge:{shift.id}", shift=shift,
         )
 
         # Trigger notification task
@@ -205,19 +197,21 @@ class ShiftUpdateService(BaseService):
         new_total = shift.rate * Decimal(str(new_duration)) * shift.quantity_needed
         diff = new_total - old_total
 
-        if diff > 0:
+        # Each edit is its own event; the shift row lock above serialises edits.
+        adjustment_key = f"shift-adjust:{shift.id}:{uuid.uuid4().hex}"
+        if diff >= ledger.CENT:
             # Additional charge
-            if facility.wallet_balance < diff:
+            diff = ledger.to_money(diff)
+            try:
+                ledger.debit(facility.user, diff, 'CHARGE', adjustment_key, shift=shift)
+            except ledger.InsufficientFunds:
                 raise ValueError(
                     f"Insufficient balance for this change. Additional ₦{diff} required, "
                     f"available: ₦{facility.wallet_balance}"
                 )
-            facility.wallet_balance -= diff
-            facility.save(update_fields=['wallet_balance'])
-        elif diff < 0:
+        elif diff <= -ledger.CENT:
             # Refund the difference
-            facility.wallet_balance += abs(diff)
-            facility.save(update_fields=['wallet_balance'])
+            ledger.credit(facility.user, ledger.to_money(abs(diff)), 'REFUND', adjustment_key, shift=shift)
 
         shift.save()
         return shift

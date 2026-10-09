@@ -1,6 +1,8 @@
 from celery import shared_task
+from django.db import transaction
 from django.utils import timezone
 from accounts.models import Professional
+from billing import ledger
 from core.utils import haversine
 from core.models import Notification
 from .models import Shift, ShiftApplication
@@ -94,29 +96,42 @@ def close_expired_shifts():
     now = timezone.now()
 
     # --- 1. Expire OPEN/FILLED shifts past their end time ---
-    expired_shifts = Shift.objects.filter(
+    expired_ids = list(Shift.objects.filter(
         status__in=['OPEN', 'FILLED'],
         end_time__lte=now,
-    )
+    ).values_list('id', flat=True))
 
     shift_count = 0
-    for shift in expired_shifts:
-        shift.status = 'COMPLETED'
-        shift.save(update_fields=['status', 'updated_at'])
+    for shift_id in expired_ids:
+        # One transaction per shift, re-checked under lock, so an overlapping
+        # run (or a retry after a crash) can't refund the same shift twice.
+        with transaction.atomic():
+            shift = (
+                Shift.objects.select_for_update(skip_locked=True)
+                .filter(id=shift_id, status__in=['OPEN', 'FILLED']).first()
+            )
+            if shift is None:
+                continue
 
-        # Refund for unfilled spots
-        unfilled = shift.quantity_needed - shift.quantity_filled
-        if unfilled > 0:
-            duration_hours = (shift.end_time - shift.start_time).total_seconds() / 3600
-            refund = shift.rate * Decimal(str(duration_hours)) * unfilled
-            facility = shift.facility
-            facility.wallet_balance += refund
-            facility.save(update_fields=['wallet_balance'])
+            shift.status = 'COMPLETED'
+            shift.save(update_fields=['status', 'updated_at'])
 
-        # Reject remaining PENDING applications
-        ShiftApplication.objects.filter(
-            shift=shift, status='PENDING',
-        ).update(status='REJECTED')
+            # Refund for unfilled spots
+            unfilled = shift.quantity_needed - shift.quantity_filled
+            if unfilled > 0:
+                duration_hours = (shift.end_time - shift.start_time).total_seconds() / 3600
+                refund = shift.rate * Decimal(str(duration_hours)) * unfilled
+                if refund >= ledger.CENT:
+                    ledger.credit(
+                        shift.facility.user, ledger.to_money(refund), 'REFUND',
+                        f"shift-unfilled-refund:{shift.id}", shift=shift,
+                        metadata={'reason': 'unfilled_slots', 'unfilled': unfilled},
+                    )
+
+            # Reject remaining PENDING applications
+            ShiftApplication.objects.filter(
+                shift=shift, status='PENDING',
+            ).update(status='REJECTED')
 
         shift_count += 1
 

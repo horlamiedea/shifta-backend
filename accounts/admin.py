@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import User, Professional, Facility
+from .models import User, Professional, Facility, WaitlistProfessional, WaitlistFacility
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
@@ -9,27 +9,36 @@ class UserAdmin(admin.ModelAdmin):
 
 @admin.register(Professional)
 class ProfessionalAdmin(admin.ModelAdmin):
-    list_display = ('user', 'license_number', 'is_verified', 'created_at')
+    list_display = ('user', 'license_number', 'wallet_balance', 'is_verified', 'created_at')
     search_fields = ('user__email', 'license_number')
     list_filter = ('is_verified',)
+    # Balances change only through billing.ledger, never by direct edit.
+    readonly_fields = ('wallet_balance',)
 
-from django.contrib import admin
+import uuid
+from decimal import Decimal
+
 from django.shortcuts import render, redirect
 from django.urls import path
 from django import forms
 from django.contrib import messages
-from .models import User, Professional, Facility
+from django.db import transaction
+from billing import ledger
 from billing.models import AdminWalletLog
 
 class FundFacilityForm(forms.Form):
-    amount = forms.DecimalField(max_digits=12, decimal_places=2)
+    amount = forms.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
     comment = forms.CharField(widget=forms.Textarea)
+    # Issued when the form renders; a double-submit reuses it and is ignored.
+    idempotency_key = forms.CharField(widget=forms.HiddenInput)
 
 @admin.register(Facility)
 class FacilityAdmin(admin.ModelAdmin):
     list_display = ('name', 'user', 'wallet_balance', 'credit_limit', 'is_verified', 'created_at')
     search_fields = ('name', 'user__email')
     list_filter = ('is_verified', 'tier')
+    # Balances change only through billing.ledger (use the Fund action).
+    readonly_fields = ('wallet_balance',)
     actions = ['fund_facility']
 
     def get_urls(self):
@@ -63,23 +72,29 @@ class FacilityAdmin(admin.ModelAdmin):
             if form.is_valid():
                 amount = form.cleaned_data['amount']
                 comment = form.cleaned_data['comment']
-                
-                # Update Balance
-                facility.wallet_balance += amount
-                facility.save()
-                
-                # Log
-                AdminWalletLog.objects.create(
-                    admin_user=request.user,
-                    facility=facility,
-                    amount=amount,
-                    comment=comment
-                )
-                
-                self.message_user(request, f"Successfully funded {facility.name} with {amount}")
+
+                with transaction.atomic():
+                    _, created = ledger.credit(
+                        facility.user, amount, 'FUNDING',
+                        f"admin-fund:{form.cleaned_data['idempotency_key']}",
+                        metadata={'admin': request.user.email, 'comment': comment},
+                        narration='Admin wallet funding',
+                    )
+                    if created:
+                        AdminWalletLog.objects.create(
+                            admin_user=request.user,
+                            facility=facility,
+                            amount=amount,
+                            comment=comment
+                        )
+
+                if created:
+                    self.message_user(request, f"Successfully funded {facility.name} with {amount}")
+                else:
+                    self.message_user(request, "This funding was already applied.", level=messages.WARNING)
                 return redirect('admin:accounts_facility_changelist')
         else:
-            form = FundFacilityForm()
+            form = FundFacilityForm(initial={'idempotency_key': uuid.uuid4().hex})
             
         context = {
             'title': f'Fund {facility.name}',
@@ -87,3 +102,26 @@ class FacilityAdmin(admin.ModelAdmin):
             'opts': self.model._meta,
         }
         return render(request, 'admin/fund_facility_form.html', context)
+
+
+@admin.register(WaitlistProfessional)
+class WaitlistProfessionalAdmin(admin.ModelAdmin):
+    list_display = ('full_name', 'email', 'medical_type', 'location', 'created_at')
+    search_fields = ('full_name', 'email', 'phone_number', 'location')
+    list_filter = ('medical_type', 'created_at')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(WaitlistFacility)
+class WaitlistFacilityAdmin(admin.ModelAdmin):
+    list_display = (
+        'facility_name',
+        'contact_name',
+        'email',
+        'facility_type',
+        'staffing_need',
+        'created_at',
+    )
+    search_fields = ('facility_name', 'contact_name', 'email', 'phone_number', 'location')
+    list_filter = ('facility_type', 'staffing_need', 'created_at')
+    readonly_fields = ('created_at', 'updated_at')

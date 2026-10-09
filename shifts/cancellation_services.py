@@ -19,10 +19,9 @@ from core.services import BaseService
 from core.models import Notification
 from .models import Shift, ShiftApplication
 from .rating_service import RatingService, refresh_professional_stats
-from billing.models import Transaction
+from billing import ledger
 from decimal import Decimal
 from django.utils import timezone
-import uuid
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +128,7 @@ class FacilityCancelShiftService(BaseService):
         if not user.is_facility:
             raise PermissionError("Only facilities can cancel shifts.")
 
-        shift = Shift.objects.get(id=shift_id)
+        shift = Shift.objects.select_for_update().get(id=shift_id)
         if shift.facility != user.facility:
             raise PermissionError("Not your shift.")
 
@@ -137,7 +136,9 @@ class FacilityCancelShiftService(BaseService):
             raise ValueError("professional_id is required to remove a professional.")
 
         try:
-            application = ShiftApplication.objects.select_related(
+            # Locked so a concurrent duplicate request waits, then finds the
+            # application already CANCELLED instead of refunding again.
+            application = ShiftApplication.objects.select_for_update(of=('self',)).select_related(
                 'professional__user'
             ).get(shift=shift, professional__id=professional_id, status='CONFIRMED')
         except ShiftApplication.DoesNotExist:
@@ -162,26 +163,17 @@ class FacilityCancelShiftService(BaseService):
             refund_pct, comp_pct = Decimal('0.60'), Decimal('0.40')
             tier_label = "last-minute"
 
-        refund_amount = total_cost * refund_pct
-        compensation = total_cost * comp_pct
+        refund_amount = ledger.to_money(total_cost * refund_pct)
+        compensation = ledger.to_money(total_cost * comp_pct)
 
-        # Wallet adjustments
-        shift.facility.wallet_balance += refund_amount
-        shift.facility.save(update_fields=['wallet_balance'])
-
-        application.professional.wallet_balance += compensation
-        application.professional.save(update_fields=['wallet_balance'])
-
-        # Transaction logs
-        Transaction.objects.create(
-            user=user, amount=refund_amount,
-            transaction_type='REFUND', reference=str(uuid.uuid4()),
-            status='SUCCESS', shift=shift,
+        ledger.credit(
+            shift.facility.user, refund_amount, 'REFUND',
+            f"facility-cancel-refund:{application.id}", shift=shift,
         )
-        Transaction.objects.create(
-            user=application.professional.user, amount=compensation,
-            transaction_type='PAYOUT', reference=str(uuid.uuid4()),
-            status='SUCCESS', shift=shift,
+        ledger.credit(
+            application.professional.user, compensation, 'PAYOUT',
+            f"facility-cancel-comp:{application.id}", shift=shift,
+            metadata={'reason': 'facility_cancellation', 'tier': tier_label},
         )
 
         # Update application
@@ -374,15 +366,12 @@ class FacilityDeleteShiftService(BaseService):
         ).select_related('professional__user')
 
         for app in confirmed_apps:
-            compensation = cost_per_slot * Decimal('0.40')  # 40% comp for deletion
+            compensation = ledger.to_money(cost_per_slot * Decimal('0.40'))  # 40% comp for deletion
 
-            app.professional.wallet_balance += compensation
-            app.professional.save(update_fields=['wallet_balance'])
-
-            Transaction.objects.create(
-                user=app.professional.user, amount=compensation,
-                transaction_type='PAYOUT', reference=str(uuid.uuid4()),
-                status='SUCCESS', shift=shift,
+            ledger.credit(
+                app.professional.user, compensation, 'PAYOUT',
+                f"shift-delete-comp:{app.id}", shift=shift,
+                metadata={'reason': 'shift_deleted'},
             )
 
             app.status = 'CANCELLED'
@@ -412,14 +401,11 @@ class FacilityDeleteShiftService(BaseService):
         total_confirmed_comp = cost_per_slot * Decimal('0.40') * confirmed_apps.count()
         total_original_cost = cost_per_slot * shift.quantity_needed
         refund = total_original_cost - total_confirmed_comp
-        if refund > 0:
-            shift.facility.wallet_balance += refund
-            shift.facility.save(update_fields=['wallet_balance'])
-
-            Transaction.objects.create(
-                user=user, amount=refund,
-                transaction_type='REFUND', reference=str(uuid.uuid4()),
-                status='SUCCESS', shift=shift,
+        if refund >= ledger.CENT:
+            refund = ledger.to_money(refund)
+            ledger.credit(
+                shift.facility.user, refund, 'REFUND',
+                f"shift-delete-refund:{shift.id}", shift=shift,
             )
 
         shift.status = 'CANCELLED'
@@ -481,15 +467,14 @@ class FacilityEndShiftEarlyService(BaseService):
 
             total_pay = base_pay + bonus
 
-            # Pay professional
-            app.professional.wallet_balance += total_pay
-            app.professional.save(update_fields=['wallet_balance'])
-
-            Transaction.objects.create(
-                user=app.professional.user, amount=total_pay,
-                transaction_type='PAYOUT', reference=str(uuid.uuid4()),
-                status='SUCCESS', shift=shift,
-            )
+            # Pay professional (nothing to pay if ended the instant they clocked in)
+            if total_pay >= ledger.CENT:
+                total_pay = ledger.to_money(total_pay)
+                ledger.credit(
+                    app.professional.user, total_pay, 'PAYOUT',
+                    f"shift-early-end-pay:{app.id}", shift=shift,
+                    metadata={'reason': 'shift_ended_early', 'bonus': str(bonus)},
+                )
 
             # Complete the application
             app.clock_out_time = now
@@ -523,15 +508,12 @@ class FacilityEndShiftEarlyService(BaseService):
 
         for app in confirmed_apps:
             cost = shift.rate * Decimal(str(scheduled_hours))
-            compensation = cost * Decimal('0.40')
+            compensation = ledger.to_money(cost * Decimal('0.40'))
 
-            app.professional.wallet_balance += compensation
-            app.professional.save(update_fields=['wallet_balance'])
-
-            Transaction.objects.create(
-                user=app.professional.user, amount=compensation,
-                transaction_type='PAYOUT', reference=str(uuid.uuid4()),
-                status='SUCCESS', shift=shift,
+            ledger.credit(
+                app.professional.user, compensation, 'PAYOUT',
+                f"shift-early-end-comp:{app.id}", shift=shift,
+                metadata={'reason': 'shift_ended_early_before_clock_in'},
             )
 
             app.status = 'CANCELLED'
@@ -564,14 +546,11 @@ class FacilityEndShiftEarlyService(BaseService):
         )
         total_spent = total_paid_out + total_confirmed_comp
         refund = total_original_cost - total_spent
-        if refund > 0:
-            shift.facility.wallet_balance += refund
-            shift.facility.save(update_fields=['wallet_balance'])
-
-            Transaction.objects.create(
-                user=user, amount=refund,
-                transaction_type='REFUND', reference=str(uuid.uuid4()),
-                status='SUCCESS', shift=shift,
+        if refund >= ledger.CENT:
+            refund = ledger.to_money(refund)
+            ledger.credit(
+                shift.facility.user, refund, 'REFUND',
+                f"shift-early-end-refund:{shift.id}", shift=shift,
             )
 
         shift.status = 'COMPLETED'

@@ -7,6 +7,42 @@ from .services import UserRegisterService, UserLoginService, AdminVerifyFacility
 from .selectors import UserSelector
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes, inline_serializer
 from rest_framework import serializers
+from .models import WaitlistProfessional, WaitlistFacility
+
+
+class ProfessionalWaitlistInputSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    full_name = serializers.CharField(max_length=255)
+    phone_number = serializers.CharField(max_length=20)
+    medical_type = serializers.CharField(max_length=100)
+    location = serializers.CharField(max_length=255)
+    years_of_experience = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=0,
+        max_value=70,
+    )
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+
+class FacilityWaitlistInputSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    facility_name = serializers.CharField(max_length=255)
+    contact_name = serializers.CharField(max_length=255)
+    phone_number = serializers.CharField(max_length=20)
+    facility_type = serializers.ChoiceField(choices=WaitlistFacility.FACILITY_TYPES)
+    location = serializers.CharField(max_length=255)
+    staffing_need = serializers.ChoiceField(choices=WaitlistFacility.STAFFING_NEEDS)
+    monthly_shift_volume = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=1,
+    )
+
+    def validate_email(self, value):
+        return value.strip().lower()
 
 @extend_schema(
     request=inline_serializer(
@@ -277,25 +313,7 @@ class AdminVerifyProfessionalView(APIView):
             return Response({"error": str(e)}, status=400)
 
 @extend_schema(
-    request=inline_serializer(
-        name='WaitlistCreateRequest',
-        fields={
-            'email': serializers.EmailField(),
-            'full_name': serializers.CharField(),
-            'phone_number': serializers.CharField(required=False),
-            'medical_type': serializers.CharField(required=False),
-            'bio_data': serializers.CharField(required=False),
-            'location': serializers.CharField(required=False),
-            'preferred_work_address': serializers.CharField(required=False),
-            'shift_rate_9hr': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
-            'shift_rate_12hr': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
-            'shift_rate_16hr': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
-            'shift_rate_24hr': serializers.DecimalField(max_digits=10, decimal_places=2, required=False),
-            'years_of_experience': serializers.IntegerField(required=False),
-            'cv_file': serializers.FileField(required=False),
-            'license_file': serializers.FileField(required=False),
-        }
-    ),
+    request=ProfessionalWaitlistInputSerializer,
     responses={
         201: inline_serializer(
             name='WaitlistCreateResponse',
@@ -320,48 +338,72 @@ class WaitlistCreateView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
-        from .models import WaitlistProfessional
-        
-        email = request.data.get("email")
-        full_name = request.data.get("full_name")
-        phone_number = request.data.get("phone_number")
-        medical_type = request.data.get("medical_type")
-        bio_data = request.data.get("bio_data")
-        location = request.data.get("location")
-        preferred_work_address = request.data.get("preferred_work_address")
-        shift_rate_9hr = request.data.get("shift_rate_9hr")
-        shift_rate_12hr = request.data.get("shift_rate_12hr")
-        shift_rate_16hr = request.data.get("shift_rate_16hr")
-        shift_rate_24hr = request.data.get("shift_rate_24hr")
-        years_of_experience = request.data.get("years_of_experience")
-        
-        cv_file = request.FILES.get("cv_file")
-        license_file = request.FILES.get("license_file")
-        
-        if not email or not full_name:
-             return Response({"error": "Email and Name are required"}, status=400)
-             
-        if WaitlistProfessional.objects.filter(email=email).exists():
-            return Response({"message": "Already on waitlist"}, status=200)
-            
-        WaitlistProfessional.objects.create(
-            email=email,
-            full_name=full_name,
-            phone_number=phone_number,
-            medical_type=medical_type,
-            bio_data=bio_data,
-            location=location,
-            preferred_work_address=preferred_work_address,
-            shift_rate_9hr=shift_rate_9hr,
-            shift_rate_12hr=shift_rate_12hr,
-            shift_rate_16hr=shift_rate_16hr,
-            shift_rate_24hr=shift_rate_24hr,
-            years_of_experience=years_of_experience,
-            cv_file=cv_file,
-            license_file=license_file
+        serializer = ProfessionalWaitlistInputSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"error": "Please check the highlighted fields", "fields": serializer.errors},
+                status=400,
+            )
+
+        data = serializer.validated_data
+        if WaitlistProfessional.objects.filter(email__iexact=data["email"]).exists():
+            return Response({"status": "existing", "message": "Already on waitlist"}, status=200)
+
+        WaitlistProfessional.objects.create(**data)
+        return Response(
+            {"status": "success", "message": "Added to professional waitlist"},
+            status=201,
         )
-        
-        return Response({"status": "success", "message": "Added to waitlist"}, status=201)
+
+
+@extend_schema(
+    request=FacilityWaitlistInputSerializer,
+    responses={
+        201: inline_serializer(
+            name='FacilityWaitlistCreateResponse',
+            fields={
+                'status': serializers.CharField(),
+                'message': serializers.CharField(),
+            },
+        ),
+        200: inline_serializer(
+            name='FacilityWaitlistExistingResponse',
+            fields={
+                'status': serializers.CharField(),
+                'message': serializers.CharField(),
+            },
+        ),
+        400: inline_serializer(
+            name='FacilityWaitlistErrorResponse',
+            fields={
+                'error': serializers.CharField(),
+                'fields': serializers.DictField(),
+            },
+        ),
+    },
+)
+@route("auth/waitlist/facility/", name="facility-waitlist-create")
+class FacilityWaitlistCreateView(APIView):
+    permission_classes = [AllowAny]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = FacilityWaitlistInputSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"error": "Please check the highlighted fields", "fields": serializer.errors},
+                status=400,
+            )
+
+        data = serializer.validated_data
+        if WaitlistFacility.objects.filter(email__iexact=data["email"]).exists():
+            return Response({"status": "existing", "message": "Already on waitlist"}, status=200)
+
+        WaitlistFacility.objects.create(**data)
+        return Response(
+            {"status": "success", "message": "Added to facility waitlist"},
+            status=201,
+        )
 
 @extend_schema(
     request=inline_serializer(
@@ -562,4 +604,3 @@ class FacilityStaffUpdateView(APIView):
         service.update_staff(staff, role, permissions)
         
         return Response({"status": "updated"})
-

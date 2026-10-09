@@ -29,7 +29,27 @@ class User(AbstractUser):
         return hasattr(self, 'facility')
 
 
-class Professional(BaseModel):
+class WalletBalanceGuardMixin:
+    """
+    Keeps `wallet_balance` writable only by the billing ledger.
+
+    A plain save() on an existing row writes every column, so a stale
+    instance (e.g. loaded before a concurrent payout committed) would silently
+    overwrite the newer balance. Here, save() without update_fields skips
+    wallet_balance; billing.ledger writes it with
+    save(update_fields=['wallet_balance', ...]) while holding a row lock.
+    """
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding and kwargs.get('update_fields') is None:
+            kwargs['update_fields'] = [
+                f.name for f in self._meta.concrete_fields
+                if not f.primary_key and f.name != 'wallet_balance'
+            ]
+        super().save(*args, **kwargs)
+
+
+class Professional(WalletBalanceGuardMixin, BaseModel):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='professional')
     license_number = models.CharField(max_length=50, unique=True)
     license_expiry_date = models.DateField(null=True, blank=True)
@@ -86,7 +106,7 @@ class Professional(BaseModel):
         return f"Professional: {self.user.email}"
 
 
-class Facility(BaseModel):
+class Facility(WalletBalanceGuardMixin, BaseModel):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='facility')
     name = models.CharField(max_length=255)
     address = models.TextField()
@@ -170,3 +190,35 @@ class WaitlistProfessional(BaseModel):
     
     def __str__(self):
         return f"Waitlist: {self.email} ({self.medical_type})"
+
+
+class WaitlistFacility(BaseModel):
+    FACILITY_TYPES = (
+        ('HOSPITAL', 'Hospital'),
+        ('CLINIC', 'Clinic'),
+        ('SPECIALIST', 'Specialist Centre'),
+        ('DIAGNOSTIC', 'Diagnostic Centre'),
+        ('OTHER', 'Other'),
+    )
+    STAFFING_NEEDS = (
+        ('URGENT', 'Urgent cover'),
+        ('REGULAR', 'Regular shift coverage'),
+        ('SEASONAL', 'Seasonal or temporary coverage'),
+        ('EXPLORING', 'Exploring future staffing options'),
+    )
+
+    email = models.EmailField(unique=True)
+    facility_name = models.CharField(max_length=255)
+    contact_name = models.CharField(max_length=255)
+    phone_number = models.CharField(max_length=20)
+    facility_type = models.CharField(max_length=20, choices=FACILITY_TYPES)
+    location = models.CharField(max_length=255)
+    staffing_need = models.CharField(
+        max_length=20,
+        choices=STAFFING_NEEDS,
+        default='EXPLORING',
+    )
+    monthly_shift_volume = models.PositiveIntegerField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Facility waitlist: {self.facility_name} ({self.email})"
