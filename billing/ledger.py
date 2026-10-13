@@ -8,13 +8,15 @@ Every credit or debit:
      same business event (a shift payout, a webhook, a retried task) can never
      be applied twice;
   3. writes a Transaction row recording the direction and resulting balance;
-  4. optionally queues a WalletTransfer so the user's Embedly wallet makes the
-     same movement against the platform (escrow) wallet. The transfer is sent
-     after the DB transaction commits.
+  4. for professionals, queues a WalletTransfer so their Embedly wallet makes
+     the same movement against the platform wallet. The transfer is sent after
+     the DB transaction commits.
 
-Money flow mirrored on Embedly:
-  facility debit (shift charge)         facility wallet  -> platform wallet
-  facility credit (refund, top-up)      platform wallet  -> facility wallet
+Where the money is on Embedly:
+  Facilities have no Embedly wallet. They fund through Paystack and their
+  balances (and shift escrow) are held in Shifta's platform wallet, so facility
+  movements are ledger-only; reconciliation checks the platform wallet covers
+  them (billing.reconciliation.platform_cover).
   professional credit (pay, comp)       platform wallet  -> professional wallet
   professional debit (withdrawal)       handled by the withdrawal service
 """
@@ -89,7 +91,8 @@ def post(user, amount, direction, transaction_type, idempotency_key, *,
 
     settle=False records the movement in the app only — use it when the money
     has already moved on Embedly (an inflow webhook) or when the caller queues
-    its own transfer (withdrawals).
+    its own transfer (withdrawals). Facility movements never settle: facility
+    money lives in the platform wallet already.
 
     pending: an existing PENDING Transaction (e.g. a Paystack checkout) to
     complete in place instead of creating a second history row.
@@ -143,7 +146,7 @@ def post(user, amount, direction, transaction_type, idempotency_key, *,
     else:
         tx = Transaction.objects.create(reference=reference or uuid.uuid4().hex, **fields)
 
-    if settle:
+    if settle and isinstance(owner, Professional):
         is_debit = direction == Transaction.DEBIT
         queue_transfer(
             kind=WalletTransfer.WALLET_TO_WALLET,

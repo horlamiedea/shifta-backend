@@ -61,7 +61,9 @@ def provision_missing_wallets():
     except Exception:
         logger.exception("Platform wallet activation failed")
 
-    waiting = EmbedlyWallet.objects.filter(status=EmbedlyWallet.PENDING_TIER).exclude(customer_id__isnull=True)
+    waiting = EmbedlyWallet.objects.filter(
+        status=EmbedlyWallet.PENDING_TIER, user__professional__isnull=False,
+    ).exclude(customer_id__isnull=True)
     activated = 0
     for wallet_id in waiting.values_list('id', flat=True)[:200]:
         try:

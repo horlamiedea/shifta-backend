@@ -9,9 +9,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from decimal import Decimal
 from core.router import route
 from .models import Invoice, Transaction, EmbedlyWallet
-from .serializers import (
-    TransactionSerializer, WalletKycSerializer, CorporateKycSerializer, WithdrawalSerializer, AmountSerializer,
-)
+from .serializers import TransactionSerializer, WalletKycSerializer, WithdrawalSerializer, AmountSerializer
 from .services import ReleaseFundsService
 from .wallet_service import (
     WalletFundingService, WalletFundingVerifyService, WalletWithdrawalService, WalletKycService,
@@ -125,20 +123,10 @@ def _wallet_payload(wallet):
         # Open in a browser/webview so the user can take the KYC selfie.
         'liveness_url': wallet.meta.get('liveness_url') if wallet.status == EmbedlyWallet.PENDING_LIVENESS else None,
         'last_error': wallet.meta.get('last_error') or None,
-        # Facilities: progress of the business review Embedly does before opening the wallet.
-        'business_review': {
-            'directors': len(wallet.meta.get('directors') or []),
-            'documents_submitted': bool(wallet.meta.get('documents_submitted_at')),
-            'approval': wallet.meta.get('approval') or None,
-        } if wallet.user.is_facility else None,
         'message': {
             EmbedlyWallet.PENDING_KYC: 'Verify your identity to open your wallet.',
             EmbedlyWallet.PENDING_LIVENESS: 'Take a quick selfie to finish verifying your identity.',
-            EmbedlyWallet.PENDING_TIER: (
-                'Documents received. Your wallet opens once the provider approves your business.'
-                if wallet.user.is_facility else
-                'Verification received. Your wallet will open once the provider approves it.'
-            ),
+            EmbedlyWallet.PENDING_TIER: 'Verification received. Your wallet will open once the provider approves it.',
             EmbedlyWallet.ACTIVE: 'Fund your wallet by bank transfer to the account above.',
             EmbedlyWallet.FAILED: 'We could not open your wallet. Contact support.',
         }.get(wallet.status, ''),
@@ -158,9 +146,9 @@ class WalletBalanceView(APIView):
         elif user.is_facility:
             balance = user.facility.wallet_balance
 
-        wallet_info = {}
-        if user.is_professional or user.is_facility:
-            wallet_info = _wallet_payload(ensure_wallet_record(user))
+        # Only professionals have an Embedly wallet; a facility's money is held
+        # in the platform wallet and funded through Paystack.
+        wallet_info = _wallet_payload(ensure_wallet_record(user)) if user.is_professional else None
 
         return Response({
             'balance': str(balance),
@@ -174,45 +162,25 @@ class WalletBalanceView(APIView):
 @route("billing/wallet/kyc/", name="wallet-kyc")
 class WalletKycView(MoneyWriteThrottleMixin, APIView):
     """
-    Open the user's Embedly wallet.
-
-    Professional (JSON): {bvn and/or nin, dob: YYYY-MM-DD, address, city, middle_name?}
-      -> may answer status PENDING_LIVENESS with `liveness_url`; open it for the
-         selfie. POST again (empty body) for a fresh link.
-
-    Facility (multipart/form-data): tin, city, one director (director_first_name,
-      director_last_name, director_middle_name?, director_email, director_phone,
-      director_dob, director_address, director_bvn, director_nin,
-      director_meter_number, director_disco_code) and six documents (cac,
-      tin_document, board_resolution, utility_bill, memart, scuml; PDF/JPEG/PNG,
-      5 MB max). Answers PENDING_TIER until Embedly approves the business.
-      Post again to add another director or replace the documents.
+    Open a professional's Embedly wallet:
+    {bvn and/or nin, dob: YYYY-MM-DD, address, city, middle_name?}
+    -> may answer status PENDING_LIVENESS with `liveness_url`; open it for the
+       selfie. POST again (empty body) for a fresh link.
+    Facilities don't have wallets (they fund by card or bank transfer).
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        user = request.user
+        serializer = WalletKycSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({'error': _first_error(serializer)}, status=400)
+        data = serializer.validated_data
         try:
-            if user.is_facility:
-                serializer = CorporateKycSerializer(data=request.data)
-                if not serializer.is_valid():
-                    return Response({'error': _first_error(serializer)}, status=400)
-                data = serializer.validated_data
-                wallet = WalletKycService()(
-                    user, tin=data.get('tin'), city=data.get('city'),
-                    director=serializer.director(),
-                    documents=serializer.documents(fallback_cac=user.facility.cac_file or None),
-                )
-            else:
-                serializer = WalletKycSerializer(data=request.data)
-                if not serializer.is_valid():
-                    return Response({'error': _first_error(serializer)}, status=400)
-                data = serializer.validated_data
-                wallet = WalletKycService()(
-                    user, bvn=data.get('bvn') or None, nin=data.get('nin') or None,
-                    dob=data.get('dob'), address=data.get('address'), city=data.get('city'),
-                    middle_name=data.get('middle_name', ''),
-                )
+            wallet = WalletKycService()(
+                request.user, bvn=data.get('bvn') or None, nin=data.get('nin') or None,
+                dob=data.get('dob'), address=data.get('address'), city=data.get('city'),
+                middle_name=data.get('middle_name', ''),
+            )
         except PermissionError as e:
             return Response({'error': str(e)}, status=403)
         except ValueError as e:
@@ -373,6 +341,8 @@ class SimulateInflowView(APIView):
         serializer = AmountSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({'error': _first_error(serializer)}, status=400)
+        if request.user.is_facility:
+            return Response({'error': 'Facilities fund through Paystack; use its test mode on staging.'}, status=400)
         wallet = EmbedlyWallet.objects.filter(user=request.user, status=EmbedlyWallet.ACTIVE).first()
         if wallet is None:
             return Response({'error': 'Your wallet is not active yet.'}, status=400)

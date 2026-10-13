@@ -1,22 +1,21 @@
 """
-Create Embedly wallets for every facility and professional.
+Create Embedly wallets for every professional. (Facilities have none: their
+money is held in the platform wallet and they fund through Paystack.)
 
     python manage.py provision_wallets
     python manage.py provision_wallets --staging-test-kyc   # staging only
 
 Embedly opens a wallet only for a customer with a KYC tier (BVN/NIN + a
-liveness selfie for individuals; back-office approval for businesses), so for
-each user this:
+liveness selfie), so for each professional this:
   - ensures a local wallet record exists,
   - retries opening the wallet for users who already passed KYC,
   - and reports who still has to submit KYC (POST /api/v1/billing/wallet/kyc/).
 
 --staging-test-kyc fills in a staging test identity (a placeholder BVN unique
 to each user — staging accepts any 11 digits but links each BVN to one
-customer — plus a placeholder date of birth and address; a placeholder TIN for
-facilities) for users who haven't done KYC, and runs staging's mocked
-liveness check, so seeded/test accounts can get wallets on staging. It refuses
-to run against production.
+customer — plus a placeholder date of birth and address) for professionals who
+haven't done KYC, and runs staging's mocked liveness check, so seeded/test
+accounts can get wallets on staging. It refuses to run against production.
 """
 import hashlib
 from collections import Counter
@@ -37,7 +36,7 @@ def staging_test_bvn(user):
 
 
 class Command(BaseCommand):
-    help = "Create Embedly wallets for all facilities and professionals."
+    help = "Create Embedly wallets for all professionals."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -50,18 +49,15 @@ class Command(BaseCommand):
         if test_kyc and not is_staging():
             raise CommandError("--staging-test-kyc only runs against Embedly staging.")
 
-        users = (
-            User.objects.filter(professional__isnull=False) | User.objects.filter(facility__isnull=False)
-        ).distinct().select_related('professional', 'facility').order_by('email')
+        users = User.objects.filter(professional__isnull=False).select_related('professional').order_by('email')
 
         summary = Counter()
         for user in users:
             wallet = ensure_wallet_record(user)
             note = ''
             try:
-                if test_kyc and wallet.status != EmbedlyWallet.ACTIVE and (
-                        user.is_professional or wallet.status in (EmbedlyWallet.PENDING_KYC, EmbedlyWallet.FAILED)):
-                    # Professionals with verified IDs resume at the (mocked) selfie step.
+                if test_kyc and wallet.status != EmbedlyWallet.ACTIVE:
+                    # Verified IDs resume at the (mocked) selfie step.
                     wallet = self._test_kyc(user)
                 elif wallet.status == EmbedlyWallet.PENDING_TIER:
                     wallet = activate_wallet(wallet.pk)
@@ -71,10 +67,9 @@ class Command(BaseCommand):
             note = note or wallet.meta.get('last_error', '')
             summary[wallet.status] += 1
 
-            kind = 'facility' if user.is_facility else 'professional'
             style = self.style.SUCCESS if wallet.status == EmbedlyWallet.ACTIVE else self.style.WARNING
             self.stdout.write(style(
-                f"{wallet.status:<13} {kind:<12} {user.email:<40} {wallet.account_number or '':<12} {note}"
+                f"{wallet.status:<16} {user.email:<40} {wallet.account_number or '':<12} {note}"
             ))
 
         self.stdout.write('')
@@ -96,8 +91,6 @@ class Command(BaseCommand):
 
     def _test_kyc(self, user):
         service = WalletKycService()
-        if user.is_facility:
-            return service(user, tin=f"TEST-{user.facility.rc_number}"[:30], city='Lagos')
         if not (user.first_name and user.last_name):
             raise ValueError('needs first and last name')
         return service(

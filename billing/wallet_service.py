@@ -1,16 +1,18 @@
 """
 Wallet Service - wallet provisioning, funding and withdrawals via Embedly.
 
+Only professionals have Embedly wallets (they withdraw to banks). Facilities
+fund through Paystack and their money is held in Shifta's platform wallet, so
+they need no KYC (see billing.ledger).
+
 Provisioning: Embedly only opens a wallet for a customer with a KYC tier.
   professional -> individual customer -> BVN and/or NIN check -> liveness
                   (selfie) -> tier assigned -> individual wallet
-  facility     -> corporate customer + director + six documents (billing.corporate)
-                  -> Embedly back-office approval -> corporate wallet
 Liveness finishes instantly on staging; in production the user opens a link
 and a customer.liveness.* webhook resumes provisioning. provision_missing_wallets
 retries PENDING_TIER wallets until Embedly lets them open.
 
-Funding: each wallet has a virtual NUBAN. A bank transfer into it fires the
+Inflows: each wallet has a virtual NUBAN. A bank transfer into it fires the
 `nip` webhook, which credits the app wallet (see billing.webhooks).
 
 Withdrawal: the professional's app balance is debited at once; Embedly pays
@@ -64,11 +66,13 @@ def _kyc_passed(data):
 class WalletCreateService(BaseService):
     """
     Called at registration. Embedly needs KYC details the sign-up form doesn't
-    collect, so this only records that the user needs a wallet; the user then
-    completes WalletKycService.
+    collect, so this only records that a professional needs a wallet; they then
+    complete WalletKycService. Facilities get no wallet (see module docstring).
     """
 
     def __call__(self, user):
+        if not user.is_professional:
+            return None
         return ensure_wallet_record(user)
 
 
@@ -78,24 +82,26 @@ class WalletKycService(BaseService):
     ID_PATTERN = re.compile(r'^\d{11}$')
 
     def __call__(self, user, *, bvn=None, nin=None, dob=None, address=None, city=None,
-                 middle_name='', tin=None, director=None, documents=None):
+                 middle_name=''):
+        if user.is_facility:
+            raise ValueError(
+                "Facilities don't need a wallet to be verified. Fund your Shifta balance by card or bank transfer."
+            )
+        if not user.is_professional:
+            raise PermissionError("Only professionals have wallets.")
+
         wallet = ensure_wallet_record(user)
         if wallet.status == EmbedlyWallet.ACTIVE:
             return wallet
 
-        if user.is_professional:
-            # Already verified IDs (e.g. returning to finish the selfie) skip straight to liveness.
-            if not (wallet.meta.get('kyc') and wallet.status in (
-                    EmbedlyWallet.PENDING_LIVENESS, EmbedlyWallet.PENDING_TIER)):
-                self._individual(user, wallet, bvn=bvn, nin=nin, dob=dob, address=address,
-                                 city=city, middle_name=middle_name)
-            wallet = start_liveness(wallet)
-            if wallet.status == EmbedlyWallet.PENDING_LIVENESS:
-                return wallet  # the user opens meta['liveness_url']; a webhook finishes the job
-        elif user.is_facility:
-            self._corporate(user, wallet, tin=tin, city=city, director=director, documents=documents)
-        else:
-            raise PermissionError("Only facilities and professionals have wallets.")
+        # Already verified IDs (e.g. returning to finish the selfie) skip straight to liveness.
+        if not (wallet.meta.get('kyc') and wallet.status in (
+                EmbedlyWallet.PENDING_LIVENESS, EmbedlyWallet.PENDING_TIER)):
+            self._individual(user, wallet, bvn=bvn, nin=nin, dob=dob, address=address,
+                             city=city, middle_name=middle_name)
+        wallet = start_liveness(wallet)
+        if wallet.status == EmbedlyWallet.PENDING_LIVENESS:
+            return wallet  # the user opens meta['liveness_url']; a webhook finishes the job
 
         return activate_wallet(wallet.pk)
 
@@ -155,17 +161,6 @@ class WalletKycService(BaseService):
         }}
         wallet.status = EmbedlyWallet.PENDING_LIVENESS
         wallet.save(update_fields=['meta', 'status', 'updated_at'])
-
-    def _corporate(self, user, wallet, *, tin, city, director, documents):
-        facility = user.facility
-        corporate.submit(
-            wallet,
-            business=corporate.Business(
-                name=facility.name, rc_number=facility.rc_number, tin=tin or '',
-                address=facility.address, city=city or 'Lagos', email=user.email,
-            ),
-            director=director, documents=documents,
-        )
 
 
 def start_liveness(wallet):
@@ -248,12 +243,8 @@ def activate_wallet(wallet_id):
             return wallet
 
         user = wallet.user
-        if user.is_facility:
-            name = user.facility.name
-            r = embedly_client.create_corporate_wallet(wallet.customer_id, name[:60])
-        else:
-            name = f"{user.first_name} {user.last_name}".strip() or user.email
-            r = embedly_client.create_individual_wallet(wallet.customer_id, f"{name} - Shifta")
+        name = f"{user.first_name} {user.last_name}".strip() or user.email
+        r = embedly_client.create_individual_wallet(wallet.customer_id, f"{name} - Shifta")
 
         if r.ok and apply_created_wallet(wallet, r, name):
             wallet.is_active = True
@@ -264,7 +255,7 @@ def activate_wallet(wallet_id):
         if r.ok:
             return wallet  # created without an account number; logged in meta
 
-        record_wallet_refusal(wallet, r, corporate_customer=user.is_facility)
+        record_wallet_refusal(wallet, r, corporate_customer=False)
         wallet.is_active = False
         wallet.save(update_fields=['status', 'is_active', 'meta', 'updated_at'])
         return wallet
@@ -365,10 +356,20 @@ class WalletFundingVerifyService(BaseService):
         except (requests.exceptions.RequestException, ValueError):
             raise ValueError("Could not verify payment. Please try again.")
 
-        paid = data.get('status') and (data.get('data') or {}).get('status') == 'success'
-        # Never trust the amount we asked for — credit what Paystack says was paid.
-        paid_kobo = (data.get('data') or {}).get('amount')
-        if not paid or paid_kobo is None or Decimal(paid_kobo) / 100 != tx.amount:
+        payment = data.get('data') or {}
+        paid = data.get('status') and payment.get('status') == 'success'
+        # Paystack may add its fee on top (amount = requested_amount + fees), so
+        # match what we asked for and require at least that much was charged.
+        # Verified on a live test payment: requested 100000.00, charged 101624.37.
+        requested_kobo = payment.get('requested_amount', payment.get('amount'))
+        charged_kobo = payment.get('amount')
+        expected_kobo = int(tx.amount * 100)
+        if (
+            not paid
+            or payment.get('currency', 'NGN') != 'NGN'
+            or requested_kobo is None or int(requested_kobo) != expected_kobo
+            or charged_kobo is None or int(charged_kobo) < expected_kobo
+        ):
             tx.status = 'FAILED'
             tx.save(update_fields=['status', 'updated_at'])
             raise ValueError("Payment verification failed.")

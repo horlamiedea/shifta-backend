@@ -1,6 +1,10 @@
 """
 Wallet reconciliation: does each Embedly wallet hold what the app says it should?
 
+Professionals: each Embedly wallet is checked against the app balance.
+Facilities have no Embedly wallets, so platform_cover() instead checks that the
+platform wallet holds everything owed to them and to professionals.
+
 The app ledger moves instantly; Embedly catches up as queued transfers run.
 So the balance Embedly *should* report right now is
 
@@ -71,9 +75,16 @@ def reconcile_wallet(wallet):
     return drift
 
 
+def professional_wallets():
+    """Only professionals have Embedly wallets; facility money is in the platform wallet."""
+    return EmbedlyWallet.objects.filter(
+        status=EmbedlyWallet.ACTIVE, user__professional__isnull=False,
+    ).select_related('user')
+
+
 def reconcile_all():
     results = {'checked': 0, 'tallied': 0, 'drifted': 0, 'unreachable': 0}
-    for wallet in EmbedlyWallet.objects.filter(status=EmbedlyWallet.ACTIVE).select_related('user'):
+    for wallet in professional_wallets():
         drift = reconcile_wallet(wallet)
         results['checked'] += 1
         if drift is None:
@@ -82,6 +93,16 @@ def reconcile_all():
             results['tallied'] += 1
         else:
             results['drifted'] += 1
+
+    cover = platform_cover()
+    results['platform_surplus'] = cover['surplus']
+    if cover['surplus'] is not None and cover['surplus'] < 0:
+        logger.warning(
+            "Platform wallet shortfall: holds %s but owes %s (facilities %s, escrow %s, unpaid work %s, "
+            "queued to professionals %s). Top it up from the Paystack settlement account.",
+            cover['platform_balance'], cover['required'], cover['facility_balances'],
+            cover['shift_escrow'], cover['unpaid_completed_work'], cover['pending_to_professionals'],
+        )
     return results
 
 
@@ -105,3 +126,61 @@ def queue_opening_balance(wallet):
         destination_user=wallet.user, narration='Opening balance', is_opening_balance=True,
     )
     return transfers, f'queued {shortfall}'
+
+
+def platform_cover():
+    """
+    Does Shifta's platform wallet hold at least what Shifta owes?
+
+    Facilities have no Embedly wallets: their money sits in the platform wallet.
+    So instead of a per-facility tally, the platform wallet must cover
+      - every facility's unspent balance,
+      - escrow for shifts still open (charged, minus refunds and payouts so far),
+      - completed work not yet paid (the 24h hold, or a stuck payout),
+      - transfers already queued from the platform to professionals.
+    Anything above that is Shifta's own money (fees, penalties). A negative
+    `surplus` is a shortfall: the wallet needs topping up from the Paystack
+    settlement account, or something has gone wrong.
+    """
+    from django.db.models import Exists, OuterRef
+    from shifts.models import Shift, ShiftApplication
+    from .models import Transaction
+    from .platform import platform_account_number
+
+    def total(qs):
+        return qs.aggregate(s=Sum('amount'))['s'] or Decimal('0')
+
+    facility_balances = Facility.objects.aggregate(s=Sum('wallet_balance'))['s'] or Decimal('0')
+
+    active = Transaction.objects.filter(shift__status__in=('OPEN', 'FILLED'), status='SUCCESS')
+    shift_escrow = max(
+        total(active.filter(transaction_type='CHARGE'))
+        - total(active.filter(transaction_type__in=('REFUND', 'PAYOUT'))),
+        Decimal('0'),
+    )
+
+    paid = Transaction.objects.filter(
+        transaction_type='PAYOUT', shift=OuterRef('shift'), user=OuterRef('professional__user'),
+    )
+    unpaid_work = Decimal('0')
+    for app in ShiftApplication.objects.filter(status='COMPLETED').exclude(Exists(paid)).select_related('shift'):
+        hours = (app.shift.end_time - app.shift.start_time).total_seconds() / 3600
+        unpaid_work += ledger.to_money(app.shift.rate * Decimal(str(hours))) if hours > 0 else Decimal('0')
+
+    pending_to_professionals = total(WalletTransfer.objects.filter(
+        status__in=WalletTransfer.OPEN_STATUSES, source_user__isnull=True, destination_user__isnull=False,
+    ))
+
+    required = facility_balances + shift_escrow + unpaid_work + pending_to_professionals
+    account = platform_account_number()
+    balance = provider_balance(account) if account else None
+    return {
+        'platform_account': account or None,
+        'platform_balance': balance,
+        'facility_balances': facility_balances,
+        'shift_escrow': shift_escrow,
+        'unpaid_completed_work': unpaid_work,
+        'pending_to_professionals': pending_to_professionals,
+        'required': required,
+        'surplus': None if balance is None else balance - required,
+    }

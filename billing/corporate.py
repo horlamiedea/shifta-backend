@@ -1,6 +1,7 @@
 """
-Corporate (business) onboarding on Embedly — used for facility wallets and for
-Shifta's own platform wallet.
+Corporate (business) onboarding on Embedly — used for Shifta's own platform
+wallet (`manage.py setup_platform_wallet --config`). Facilities have no Embedly
+wallets, so they never go through this.
 
 Embedly opens a corporate wallet only after its back office approves the
 business. For approval it needs (all verified on staging, 2026-10-08):
@@ -96,6 +97,8 @@ def submit(record, *, business, director=None, documents=None):
         raise ValueError("Your company TIN is required.")
     if not directors and director is None:
         raise ValueError("Add at least one company director.")
+    if director is not None and director.disco_code not in DISCO_CODES:
+        raise ValueError(f"Unknown electricity distributor {director.disco_code!r}; use one of {', '.join(DISCO_CODES)}.")
     if documents is not None or not meta.get('documents_submitted_at'):
         _validate_documents(documents or {})
 

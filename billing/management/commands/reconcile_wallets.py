@@ -1,5 +1,9 @@
 """
-Check that every Embedly wallet tallies with the app wallet.
+Check that money on Embedly tallies with the app.
+
+Professionals: each Embedly wallet against its app balance. Facilities have no
+Embedly wallets, so the platform wallet must cover their balances, shift
+escrow and pending payouts (see billing.reconciliation.platform_cover).
 
     python manage.py reconcile_wallets
     python manage.py reconcile_wallets --queue-opening-balances
@@ -17,9 +21,8 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from billing.models import EmbedlyWallet, WalletTransfer
-from billing.platform import platform_account_number
 from billing.reconciliation import (
-    _owner_balance, provider_balance, queue_opening_balance, reconcile_wallet,
+    _owner_balance, platform_cover, professional_wallets, queue_opening_balance, reconcile_wallet,
 )
 
 
@@ -32,7 +35,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         if options['queue_opening_balances']:
-            for wallet in EmbedlyWallet.objects.filter(status=EmbedlyWallet.ACTIVE).select_related('user'):
+            for wallet in professional_wallets():
                 with transaction.atomic():
                     _, note = queue_opening_balance(wallet)
                 self.stdout.write(f"opening balance {wallet.user.email}: {note}")
@@ -42,7 +45,7 @@ class Command(BaseCommand):
         self.stdout.write(header)
         self.stdout.write('-' * len(header))
         drifted = 0
-        for wallet in EmbedlyWallet.objects.filter(status=EmbedlyWallet.ACTIVE).select_related('user'):
+        for wallet in professional_wallets():
             drift = reconcile_wallet(wallet)
             wallet.refresh_from_db()
             app = _owner_balance(wallet.user)
@@ -57,13 +60,27 @@ class Command(BaseCommand):
             else:
                 self.stdout.write(self.style.SUCCESS(line))
 
-        pending = EmbedlyWallet.objects.exclude(status=EmbedlyWallet.ACTIVE).count()
+        pending = EmbedlyWallet.objects.filter(user__professional__isnull=False) \
+            .exclude(status=EmbedlyWallet.ACTIVE).count()
         review = WalletTransfer.objects.filter(status=WalletTransfer.NEEDS_REVIEW).count()
         open_count = WalletTransfer.objects.filter(status__in=(WalletTransfer.QUEUED, WalletTransfer.PROCESSING)).count()
-        platform = platform_account_number()
-        platform_balance = provider_balance(platform) if platform else None
-
         self.stdout.write('')
-        self.stdout.write(f"Platform wallet {platform or '(not configured)'}: {platform_balance}")
-        self.stdout.write(f"Wallets drifting: {drifted} | not yet active: {pending} | "
+        self.stdout.write(f"Professional wallets drifting: {drifted} | not yet active: {pending} | "
                           f"transfers in flight: {open_count} | needing review: {review}")
+
+        # Facilities have no Embedly wallets: the platform wallet must hold their money.
+        cover = platform_cover()
+        self.stdout.write('')
+        self.stdout.write(f"Platform wallet {cover['platform_account'] or '(not configured)'}: "
+                          f"{cover['platform_balance']}")
+        for label, key in (('  facility balances', 'facility_balances'), ('  escrow on open shifts', 'shift_escrow'),
+                           ('  completed work not yet paid', 'unpaid_completed_work'),
+                           ('  queued to professionals', 'pending_to_professionals'), ('  must hold at least', 'required')):
+            self.stdout.write(f"{label:<32} {cover[key]:>14}")
+        if cover['surplus'] is None:
+            self.stdout.write(self.style.ERROR("Platform wallet unreachable or not set up."))
+        elif cover['surplus'] < 0:
+            self.stdout.write(self.style.ERROR(
+                f"SHORTFALL {-cover['surplus']}: top up the platform wallet from the Paystack settlement account."))
+        else:
+            self.stdout.write(self.style.SUCCESS(f"Covered, with {cover['surplus']} of Shifta's own funds."))

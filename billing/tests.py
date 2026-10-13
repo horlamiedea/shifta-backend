@@ -76,15 +76,15 @@ class LedgerTests(TestCase):
             with self.subTest(amount=bad), self.assertRaises(ValueError):
                 ledger.credit(user, bad, 'FUNDING', f'k-bad-{bad}')
 
-    def test_settle_queues_matching_embedly_transfer(self):
+    def test_professional_movements_settle_on_embedly_facility_ones_do_not(self):
         facility = make_facility('1000')
         pro = make_professional()
 
         debit_tx, _ = ledger.debit(facility, '300', 'CHARGE', 'k-charge')
         credit_tx, _ = ledger.credit(pro, '200', 'PAYOUT', 'k-pay')
 
-        charge = WalletTransfer.objects.get(ledger_transaction=debit_tx)
-        self.assertEqual((charge.source_user_id, charge.destination_user_id), (facility.pk, None))
+        # A facility's money already sits in the platform wallet: nothing to move.
+        self.assertFalse(WalletTransfer.objects.filter(ledger_transaction=debit_tx).exists())
         payout = WalletTransfer.objects.get(ledger_transaction=credit_tx)
         self.assertEqual((payout.source_user_id, payout.destination_user_id), (None, pro.pk))
         self.assertEqual(payout.status, WalletTransfer.QUEUED)
@@ -407,20 +407,21 @@ class EmbedlyWebhookTests(APITestCase):
 @override_settings(**EMBEDLY_TEST_SETTINGS)
 class TransferDispatchTests(TestCase):
     def setUp(self):
-        self.facility = make_facility('500000')
-        activate(self.facility, '9710000111')
+        self.pro = make_professional('0')
+        activate(self.pro, '9710000111')
 
     def charge(self, amount='30000', key='k-dispatch'):
-        tx, _ = ledger.debit(self.facility, amount, 'CHARGE', key)
+        """A shift payout: the platform wallet pays the professional's wallet."""
+        tx, _ = ledger.credit(self.pro, amount, 'PAYOUT', key)
         return list(WalletTransfer.objects.filter(ledger_transaction=tx).order_by('reference'))
 
-    def test_successful_send_moves_facility_money_to_platform(self):
+    def test_successful_send_moves_platform_money_to_professional(self):
         (t,) = self.charge()
         with mock.patch.object(embedly_client, 'wallet_to_wallet', return_value=ok(0)) as send:
             t = process_transfer(t.pk)
         self.assertEqual(t.status, WalletTransfer.SUCCESS)
         kwargs = send.call_args.kwargs
-        self.assertEqual((kwargs['from_account'], kwargs['to_account']), ('9710000111', PLATFORM))
+        self.assertEqual((kwargs['from_account'], kwargs['to_account']), (PLATFORM, '9710000111'))
         self.assertEqual(kwargs['amount'], Decimal('30000.00'))
 
     def test_waits_for_wallet_activation(self):
@@ -692,16 +693,16 @@ class WalletKycTests(APITestCase):
 @override_settings(**EMBEDLY_TEST_SETTINGS)
 class ReconciliationTests(TestCase):
     def setUp(self):
-        self.facility = make_facility('100000')  # predates the wallet: Embedly holds 0
-        self.wallet = activate(self.facility, '9710000111')
+        self.pro = make_professional('100000')  # predates the wallet: Embedly holds 0
+        self.wallet = activate(self.pro, '9710000111')
 
     def embedly_balance(self, amount):
         return mock.patch.object(embedly_client, 'get_wallet_by_account',
                                  return_value=ok({'availableBalance': amount}))
 
     def test_pending_transfers_are_not_drift(self):
-        ledger.debit(self.facility, '30000', 'CHARGE', 'k-rec')  # transfer still queued
-        self.assertEqual(expected_provider_balance(self.facility), Decimal('100000.00'))
+        ledger.credit(self.pro, '30000', 'PAYOUT', 'k-rec')  # platform -> pro transfer still queued
+        self.assertEqual(expected_provider_balance(self.pro), Decimal('100000.00'))
         with self.embedly_balance(100000):
             self.assertEqual(reconcile_wallet(self.wallet), Decimal('0'))
 
@@ -712,9 +713,58 @@ class ReconciliationTests(TestCase):
             again, note = queue_opening_balance(self.wallet)
 
         self.assertEqual([t.amount for t in transfers], [Decimal('100000.00')])
-        self.assertEqual((transfers[0].source_user, transfers[0].destination_user_id), (None, self.facility.pk))
+        self.assertEqual((transfers[0].source_user, transfers[0].destination_user_id), (None, self.pro.pk))
         self.assertIsNone(again)
         self.assertEqual(note, 'already queued')
+
+
+@override_settings(**EMBEDLY_TEST_SETTINGS)
+class PlatformCoverTests(TestCase):
+    """Facility money lives in the platform wallet, which must cover everything owed."""
+
+    def setUp(self):
+        self.facility = make_facility('50000')  # unspent facility balance
+        start = timezone.now() + timedelta(days=1)
+        # An open shift with 20,000 escrowed, 5,000 of it already refunded.
+        open_shift = Shift.objects.create(
+            facility=self.facility.facility, role='Nurse', specialty='ICU', quantity_needed=1,
+            start_time=start, end_time=start + timedelta(hours=8), rate=Decimal('2500'),
+        )
+        Transaction.objects.create(user=self.facility, amount=Decimal('20000'), transaction_type='CHARGE',
+                                   direction='DEBIT', reference='c1', status='SUCCESS', shift=open_shift)
+        Transaction.objects.create(user=self.facility, amount=Decimal('5000'), transaction_type='REFUND',
+                                   direction='CREDIT', reference='r1', status='SUCCESS', shift=open_shift)
+        # Completed work (8h x 2,500) not yet paid out: still in the 24h hold.
+        past = timezone.now() - timedelta(hours=10)
+        done = Shift.objects.create(
+            facility=self.facility.facility, role='Nurse', specialty='ICU', quantity_needed=1,
+            start_time=past, end_time=past + timedelta(hours=8), rate=Decimal('2500'), status='COMPLETED',
+        )
+        self.pro = make_professional('0')
+        ShiftApplication.objects.create(shift=done, professional=self.pro.professional,
+                                        status='COMPLETED', clock_out_time=timezone.now())
+
+    def cover(self, platform_balance):
+        with mock.patch.object(embedly_client, 'get_wallet_by_account',
+                               return_value=ok({'availableBalance': platform_balance})):
+            from .reconciliation import platform_cover
+            return platform_cover()
+
+    def test_counts_everything_owed(self):
+        cover = self.cover(100000)
+        self.assertEqual(cover['facility_balances'], Decimal('50000.00'))
+        self.assertEqual(cover['shift_escrow'], Decimal('15000.00'))
+        self.assertEqual(cover['unpaid_completed_work'], Decimal('20000.00'))
+        self.assertEqual(cover['required'], Decimal('85000.00'))
+        self.assertEqual(cover['surplus'], Decimal('15000.00'))
+
+    def test_paid_work_and_queued_transfers(self):
+        ledger.credit(self.pro, '20000', 'PAYOUT', 'k-cover-pay',
+                      shift=ShiftApplication.objects.get().shift)  # paid; transfer queued
+        cover = self.cover(80000)
+        self.assertEqual(cover['unpaid_completed_work'], Decimal('0'))
+        self.assertEqual(cover['pending_to_professionals'], Decimal('20000.00'))
+        self.assertEqual(cover['surplus'], Decimal('-5000.00'))  # shortfall
 
 
 class ShiftMoneyFlowTests(TestCase):
@@ -740,8 +790,8 @@ class ShiftMoneyFlowTests(TestCase):
         self.assertEqual(balance_of(self.facility), Decimal('60000.00'))
         charge = Transaction.objects.get(idempotency_key=f'shift-charge:{shift.id}')
         self.assertEqual((charge.amount, charge.direction), (Decimal('40000.00'), Transaction.DEBIT))
-        transfer = WalletTransfer.objects.get(ledger_transaction=charge)
-        self.assertEqual((transfer.source_user_id, transfer.destination_user_id), (self.facility.pk, None))
+        # Escrow stays in the platform wallet, where the facility's money already is.
+        self.assertFalse(WalletTransfer.objects.filter(ledger_transaction=charge).exists())
 
     def test_shift_beyond_balance_is_rejected_and_not_created(self):
         with self.assertRaises(ValueError):
@@ -779,12 +829,7 @@ class ShiftMoneyFlowTests(TestCase):
         self.assertEqual(Shift.objects.get(pk=shift.pk).quantity_filled, 0)
 
 
-# -- corporate onboarding (facilities) and the platform wallet ----------------
-
-import tempfile
-
-from django.core.files.base import ContentFile
-from django.core.files.uploadedfile import SimpleUploadedFile
+# -- facilities (no wallet) and the platform wallet -------------------------
 
 from . import corporate, platform
 from .models import PlatformWallet
@@ -792,119 +837,42 @@ from .models import PlatformWallet
 PDF = b'%PDF-1.4 test document'
 DOC_FIELDS = ('cac', 'tin_document', 'board_resolution', 'utility_bill', 'memart', 'scuml')
 UPLOADED_URL = 'https://aws-waas-assets.s3.us-west-2.amazonaws.com/WaasCore/Stg/org/doc.pdf'
-DIRECTOR_FORM = {
-    'director_first_name': 'Ngozi', 'director_last_name': 'Eze', 'director_email': 'ngozi@hospital.ng',
-    'director_phone': '+2348031112222', 'director_dob': '1975-03-09', 'director_address': '2 Marina, Lagos',
-    'director_bvn': '22111111111', 'director_nin': '33111111111', 'director_meter_number': '45012345678',
-    'director_disco_code': 'EKO',
-}
 
 
 @override_settings(**EMBEDLY_TEST_SETTINGS)
-class FacilityOnboardingTests(APITestCase):
-    url = '/api/v1/billing/wallet/kyc/'
+class FacilityNoWalletTests(APITestCase):
+    """Facilities fund through Paystack; their money is held in the platform wallet."""
 
     def setUp(self):
-        self.facility = make_facility('0')
+        self.facility = make_facility('25000')
         self.client.force_authenticate(self.facility)
-        self.embedly = {
-            'create_corporate_customer': ok({'id': 'corp-1'}),
-            'add_corporate_director': ok({'customerId': 'corp-1', 'directorId': 'dir-1'}),
-            'upload_file': ok(UPLOADED_URL),
-            'submit_corporate_documents': ok(None),
-            'create_corporate_wallet': rejected('Customer Approval is pending...', code='403'),
-            'get_corporate_customer': ok({'isCorporateVerified': 'Pending'}),
-        }
 
-    def form(self, docs=DOC_FIELDS, content=PDF, **extra):
-        data = {'tin': '01234567-0001', 'city': 'Lagos', **DIRECTOR_FORM, **extra}
-        for field in docs:
-            data[field] = SimpleUploadedFile(f'{field}.pdf', content, content_type='application/pdf')
-        return data
+    def test_wallet_endpoint_reports_balance_without_a_wallet(self):
+        data = self.client.get('/api/v1/billing/wallet/').data
+        self.assertEqual(Decimal(data['balance']), Decimal('25000'))
+        self.assertIsNone(data['wallet'])
+        self.assertFalse(EmbedlyWallet.objects.filter(user=self.facility).exists())
 
-    def submit(self, data):
-        patches = [mock.patch.object(embedly_client, name, return_value=value) for name, value in self.embedly.items()]
-        self.calls = dict(zip(self.embedly, (p.start() for p in patches)))
-        try:
-            return self.client.post(self.url, data, format='multipart')
-        finally:
-            for p in patches:
-                p.stop()
+    def test_facility_cannot_start_wallet_kyc(self):
+        with mock.patch.object(embedly_client, 'create_corporate_customer') as corporate_call, \
+                mock.patch.object(embedly_client, 'create_individual_customer') as individual_call:
+            response = self.client.post('/api/v1/billing/wallet/kyc/', {'bvn': '22222222222'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        corporate_call.assert_not_called()
+        individual_call.assert_not_called()
 
-    def test_full_submission_waits_for_embedly_approval(self):
-        response = self.submit(self.form())
-
-        self.assertEqual(response.status_code, 200, response.data)
-        wallet = response.data['wallet']
-        self.assertEqual(wallet['status'], EmbedlyWallet.PENDING_TIER)
-        self.assertEqual(wallet['business_review'],
-                         {'directors': 1, 'documents_submitted': True, 'approval': 'Pending'})
-        self.assertEqual(self.calls['upload_file'].call_count, 6)
-        submitted = self.calls['submit_corporate_documents'].call_args
-        self.assertEqual(set(submitted.args[1]), {'cac', 'tin', 'boardResolution', 'utilityBill', 'memart', 'scuml'})
-        self.assertFalse(submitted.kwargs['replace'])
-        self.assertEqual(self.calls['add_corporate_director'].call_args.kwargs['phone'], '08031112222')
-        stored = json.dumps(EmbedlyWallet.objects.get(user=self.facility).meta)
-        self.assertNotIn('22111111111', stored)
-        self.assertNotIn('33111111111', stored)
-
-    def test_incomplete_submissions_are_rejected_before_calling_embedly(self):
-        cases = {
-            'missing document': self.form(docs=DOC_FIELDS[:-1]),
-            'not a real pdf': self.form(content=b'MZ\x90\x00 windows executable'),
-            'partial director': {k: v for k, v in self.form().items() if k != 'director_nin'},
-        }
-        for name, data in cases.items():
-            with self.subTest(name):
-                response = self.submit(data)
-                self.assertEqual(response.status_code, 400)
-                self.calls['create_corporate_customer'].assert_not_called()
-
-    @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
-    def test_cac_falls_back_to_the_facility_profile(self):
-        self.facility.facility.cac_file.save('cac.pdf', ContentFile(PDF))
-        response = self.submit(self.form(docs=DOC_FIELDS[1:]))
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(self.calls['upload_file'].call_count, 6)
-
-    def test_retry_after_failed_upload_does_not_repeat_finished_steps(self):
-        self.embedly['upload_file'] = rejected('upload failed', http_status=500)
-        self.assertEqual(self.submit(self.form()).status_code, 400)
-
-        self.embedly['upload_file'] = ok(UPLOADED_URL)
-        self.assertEqual(self.submit(self.form()).status_code, 200)
-        self.calls['create_corporate_customer'].assert_not_called()  # customer kept from attempt 1
-        self.calls['add_corporate_director'].assert_not_called()      # director kept from attempt 1
-
-    def test_resubmitting_documents_replaces_them(self):
-        self.submit(self.form())
-        self.submit(self.form())
-        self.assertTrue(self.calls['submit_corporate_documents'].call_args.kwargs['replace'])
-
-    def test_wallet_opens_after_approval_and_fails_on_rejection(self):
-        from .wallet_service import activate_wallet
-        self.submit(self.form())
-        wallet = EmbedlyWallet.objects.get(user=self.facility)
-
-        corporate_wallet = ok({'id': 'w-9', 'name': 'Test Hospital', 'virtualAccount': {
-            'accountNumber': '9710123456', 'bankCode': '232', 'bankName': 'Sterling Bank'}})
-        with mock.patch.object(embedly_client, 'create_corporate_wallet', return_value=corporate_wallet):
-            self.assertEqual(activate_wallet(wallet.pk).account_number, '9710123456')
-
-        other = make_facility('0')
-        self.client.force_authenticate(other)
-        self.embedly['create_corporate_customer'] = ok({'id': 'corp-2'})
-        self.embedly['get_corporate_customer'] = ok({'isCorporateVerified': 'Rejected'})
-        response = self.submit(self.form())
-        self.assertEqual(response.data['wallet']['status'], EmbedlyWallet.FAILED)
+    def test_registration_creates_no_wallet_record_for_facilities(self):
+        from .wallet_service import WalletCreateService
+        self.assertIsNone(WalletCreateService()(self.facility))
+        self.assertFalse(EmbedlyWallet.objects.filter(user=self.facility).exists())
 
 
 @override_settings(**{**EMBEDLY_TEST_SETTINGS, 'EMBEDLY_PLATFORM_ACCOUNT_NUMBER': ''})
 class PlatformWalletTests(TestCase):
     def test_transfers_wait_until_a_platform_wallet_exists(self):
-        facility = make_facility('5000')
-        activate(facility, '9710000111')
-        tx, _ = ledger.debit(facility, '1000', 'CHARGE', 'k-no-platform')
+        pro = make_professional('0')
+        activate(pro, '9710000111')
+        tx, _ = ledger.credit(pro, '1000', 'PAYOUT', 'k-no-platform')
         t = WalletTransfer.objects.get(ledger_transaction=tx)
         with mock.patch.object(embedly_client, 'wallet_to_wallet') as send:
             t = process_transfer(t.pk)
@@ -953,3 +921,80 @@ class PlatformWalletTests(TestCase):
         with mock.patch.object(embedly_client, 'create_corporate_wallet', return_value=opened):
             platform.activate_platform_wallet()
         self.assertEqual(platform.platform_account_number(), '9710555555')
+
+
+# -- Paystack card funding ------------------------------------------------------
+
+from .wallet_service import WalletFundingVerifyService
+
+
+def paystack_verify(status='success', amount=10162437, requested=10000000, currency='NGN'):
+    """Shape of Paystack's verify response; defaults are a real test payment (fees passed on)."""
+    response = mock.Mock()
+    response.json.return_value = {'status': True, 'message': 'Verification successful', 'data': {
+        'status': status, 'amount': amount, 'requested_amount': requested,
+        'fees': amount - requested, 'currency': currency,
+    }}
+    return response
+
+
+@override_settings(**EMBEDLY_TEST_SETTINGS, PAYSTACK_SECRET_KEY='sk_test_x')
+class PaystackFundingVerifyTests(TestCase):
+    def setUp(self):
+        self.facility = make_facility('0')
+        self.tx = Transaction.objects.create(
+            user=self.facility, amount=Decimal('100000.00'), transaction_type='FUNDING',
+            reference='2da54e5b54904b1786d544e994fc3148', status='PENDING',
+        )
+
+    def verify(self, response, user=None):
+        with mock.patch('billing.wallet_service.requests.get', return_value=response):
+            return WalletFundingVerifyService()(self.tx.reference, user=user or self.facility)
+
+    def test_fee_added_on_top_still_credits_the_requested_amount(self):
+        result = self.verify(paystack_verify())  # charged 101,624.37 for 100,000
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(balance_of(self.facility), Decimal('100000.00'))
+
+    def test_redirect_and_webhook_both_verifying_credit_once(self):
+        self.verify(paystack_verify())
+        again = self.verify(paystack_verify())
+        self.assertEqual(again['status'], 'already_verified')
+        self.assertEqual(balance_of(self.facility), Decimal('100000.00'))
+
+    def test_mismatched_or_unpaid_payments_are_not_credited(self):
+        cases = {
+            'different requested amount': paystack_verify(requested=500000, amount=500000),
+            'charged less than requested': paystack_verify(amount=9000000),
+            'not successful': paystack_verify(status='abandoned'),
+            'wrong currency': paystack_verify(currency='USD'),
+        }
+        for name, response in cases.items():
+            with self.subTest(name):
+                Transaction.objects.filter(pk=self.tx.pk).update(status='PENDING')
+                with self.assertRaises(ValueError):
+                    self.verify(response)
+                self.assertEqual(balance_of(self.facility), Decimal('0.00'))
+
+    def test_another_facility_cannot_verify_this_payment(self):
+        with self.assertRaises(ValueError):
+            self.verify(paystack_verify(), user=make_facility('0'))
+        self.assertEqual(balance_of(self.facility), Decimal('0.00'))
+
+
+@override_settings(**EMBEDLY_TEST_SETTINGS, PAYSTACK_SECRET_KEY='sk_test_x')
+class ReverifyCardPaymentsTests(TestCase):
+    def test_recovers_payments_wrongly_marked_failed_once(self):
+        from io import StringIO
+        from django.core.management import call_command
+
+        facility = make_facility('0')
+        # What the 2026-10-09 release did to fee-inclusive payments.
+        Transaction.objects.create(user=facility, amount=Decimal('100000.00'), transaction_type='FUNDING',
+                                   reference='ref-wrongly-failed', status='FAILED')
+        with mock.patch('billing.wallet_service.requests.get', return_value=paystack_verify()):
+            call_command('reverify_card_payments', '--apply', stdout=StringIO())
+            call_command('reverify_card_payments', '--apply', stdout=StringIO())  # rerun is harmless
+
+        self.assertEqual(balance_of(facility), Decimal('100000.00'))
+        self.assertEqual(Transaction.objects.get(reference='ref-wrongly-failed').status, 'SUCCESS')
