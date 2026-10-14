@@ -14,7 +14,7 @@ This will create:
 - Sample Chat Rooms and Messages
 """
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 from datetime import timedelta
 from decimal import Decimal
@@ -26,12 +26,24 @@ from shifts.models import Shift, ShiftApplication
 from billing.models import Transaction, Invoice
 from communications.models import ChatRoom, Message
 from core.models import Notification
+from billing import ledger
 
 
 class Command(BaseCommand):
-    help = 'Seeds the database with mock data for testing'
+    help = 'Seeds the database with mock data for testing. DELETES all non-superuser data.'
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--confirm', action='store_true',
+            help='Required: this deletes every non-superuser account, shift and transaction.',
+        )
 
     def handle(self, *args, **options):
+        if not options['confirm']:
+            raise CommandError(
+                "seed_data deletes every non-superuser account, shift and transaction. "
+                "Never run it on a database with real users. Re-run with --confirm to proceed."
+            )
         self.stdout.write(self.style.WARNING('Seeding database with mock data...'))
         
         # Clear existing data (optional - comment out if you want to keep existing data)
@@ -122,10 +134,10 @@ class Command(BaseCommand):
                 address=data['address'],
                 rc_number=data['rc_number'],
                 is_verified=data['is_verified'],
-                wallet_balance=data['wallet_balance'],
                 location_lat=data['location_lat'],
                 location_lng=data['location_lng'],
             )
+            self.give_test_money(user, data['wallet_balance'])
             facilities.append(facility)
         
         return facilities
@@ -217,13 +229,21 @@ class Command(BaseCommand):
                 license_number=data['license_number'],
                 specialties=data['specialties'],
                 is_verified=data['is_verified'],
-                wallet_balance=data['wallet_balance'],
                 current_location_lat=data['current_location_lat'],
                 current_location_lng=data['current_location_lng'],
             )
+            self.give_test_money(user, data['wallet_balance'])
             professionals.append(professional)
         
         return professionals
+
+    def give_test_money(self, user, amount):
+        """Opening test money goes through the ledger, labelled as unbacked."""
+        if amount > 0:
+            ledger.credit(
+                user, amount, 'ADJUSTMENT', f"seed:{user.pk}", settle=False,
+                metadata={'reason': 'Seed test money (not a real payment)', 'unbacked': True},
+            )
 
     def create_shifts(self, facilities):
         shifts = []
@@ -334,6 +354,7 @@ class Command(BaseCommand):
                     transaction_type='CHARGE',
                     reference=str(uuid.uuid4()),
                     status='SUCCESS',
+                    metadata={'sample': True},  # display only: never changed a balance
                 )
         
         # Professional transactions (payouts)
@@ -345,6 +366,7 @@ class Command(BaseCommand):
                     transaction_type='PAYOUT',
                     reference=str(uuid.uuid4()),
                     status='SUCCESS',
+                    metadata={'sample': True},  # display only: never changed a balance
                 )
 
     def create_invoices(self, facilities):

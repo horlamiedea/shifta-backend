@@ -227,6 +227,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "billing.tasks.reconcile_wallets",
         "schedule": 60 * 60,
     },
+    # Every balance explained by its ledger and backed by real payments.
+    "audit-money": {
+        "task": "billing.tasks.audit_money",
+        "schedule": 24 * 60 * 60,
+    },
     "purge-idempotency-records": {
         "task": "billing.tasks.purge_idempotency_records",
         "schedule": 24 * 60 * 60,

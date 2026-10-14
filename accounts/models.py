@@ -41,6 +41,10 @@ class WalletBalanceGuardMixin:
     """
 
     def save(self, *args, **kwargs):
+        if self._state.adding and self.wallet_balance:
+            # A new account starts at zero: money arrives only as a ledger
+            # entry, so every naira has a source (billing.accounting).
+            raise ValueError("New accounts start with a zero balance; credit them through billing.ledger.")
         if not self._state.adding and kwargs.get('update_fields') is None:
             kwargs['update_fields'] = [
                 f.name for f in self._meta.concrete_fields

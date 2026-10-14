@@ -87,3 +87,22 @@ def purge_idempotency_records():
     cutoff = timezone.now() - timedelta(days=2)
     deleted, _ = IdempotencyRecord.objects.filter(created_at__lt=cutoff).delete()
     return deleted
+
+
+@shared_task
+def audit_money():
+    """Daily: every balance must be explained by its ledger and backed by real payments."""
+    from .accounting import statements, system_position
+
+    all_statements = statements()
+    for st in all_statements:
+        if st.untracked < 0:
+            logger.error("Money MISSING from %s: balance %s is %s below its ledger", st.email, st.balance, -st.untracked)
+        elif st.untracked or st.over:
+            logger.warning("Unbacked money in %s: balance %s, entitled %s (untracked %s)",
+                           st.email, st.balance, st.entitled, st.untracked)
+    position = system_position(all_statements)
+    if position['shortfall']:
+        logger.error("System shortfall %s: owes %s but should hold %s", position['shortfall'],
+                     position['owes'], position['should_hold'])
+    return {'accounts': len(all_statements), 'shortfall': str(position['shortfall'])}

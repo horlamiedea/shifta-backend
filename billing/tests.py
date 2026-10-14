@@ -14,21 +14,28 @@ from .models import Transaction, WalletTransfer
 from .services import ReleaseFundsService, ShiftPayoutService
 
 
+def _test_money(user, balance):
+    """Opening balances go through the ledger, as everywhere else (accounts start at zero)."""
+    if Decimal(balance):
+        ledger.credit(user, balance, 'ADJUSTMENT', f'test-opening:{user.pk}', settle=False,
+                      metadata={'reason': 'test fixture'})
+
+
 def make_facility(balance='0.00', email=None):
     user = User.objects.create_user(email=email or f'fac-{uuid.uuid4().hex[:8]}@test.ng', password='x')
     Facility.objects.create(
         user=user, name='Test Hospital', address='1 Marina, Lagos',
-        rc_number=uuid.uuid4().hex[:10], wallet_balance=Decimal(balance), is_verified=True,
+        rc_number=uuid.uuid4().hex[:10], is_verified=True,
     )
-    return user
+    _test_money(user, balance)
+    return User.objects.get(pk=user.pk)  # fresh: the cached account predates the opening credit
 
 
 def make_professional(balance='0.00'):
     user = User.objects.create_user(email=f'pro-{uuid.uuid4().hex[:8]}@test.ng', password='x')
-    Professional.objects.create(
-        user=user, license_number=uuid.uuid4().hex[:10], wallet_balance=Decimal(balance),
-    )
-    return user
+    Professional.objects.create(user=user, license_number=uuid.uuid4().hex[:10])
+    _test_money(user, balance)
+    return User.objects.get(pk=user.pk)
 
 
 def balance_of(user):
@@ -108,13 +115,15 @@ class LedgerTests(TestCase):
 
 class ShiftPayoutTests(TestCase):
     def setUp(self):
-        self.facility = make_facility('0')
+        self.facility = make_facility('20000')
         self.pro = make_professional()
         start = timezone.now() - timedelta(hours=10)
         self.shift = Shift.objects.create(
             facility=self.facility.facility, role='Nurse', specialty='ICU', quantity_needed=1,
             start_time=start, end_time=start + timedelta(hours=8), rate=Decimal('2500'),
         )
+        # The facility paid for the shift up front, as ShiftCreateService does.
+        ledger.debit(self.facility, '20000', 'CHARGE', f'shift-charge:{self.shift.id}', shift=self.shift)
         self.app = ShiftApplication.objects.create(
             shift=self.shift, professional=self.pro.professional,
             status='COMPLETED', clock_out_time=timezone.now(),
@@ -133,6 +142,25 @@ class ShiftPayoutTests(TestCase):
         with self.assertRaises(PermissionError):
             ReleaseFundsService()(intruder, self.app.id)
         self.assertEqual(balance_of(self.pro), Decimal('0.00'))
+
+    def test_unfunded_shift_cannot_pay_out(self):
+        # A shift nobody paid for (e.g. created by the seed command): no money to pay from.
+        start = timezone.now() - timedelta(hours=10)
+        unfunded = Shift.objects.create(
+            facility=self.facility.facility, role='Nurse', specialty='ICU', quantity_needed=1,
+            start_time=start, end_time=start + timedelta(hours=8), rate=Decimal('2500'),
+        )
+        app = ShiftApplication.objects.create(shift=unfunded, professional=make_professional().professional,
+                                              status='COMPLETED', clock_out_time=timezone.now())
+        with self.assertRaises(ledger.EscrowShortfall):
+            ShiftPayoutService()(app.id)
+        self.assertFalse(Transaction.objects.filter(shift=unfunded, transaction_type='PAYOUT').exists())
+
+    def test_escrow_cannot_pay_out_more_than_was_charged(self):
+        ShiftPayoutService()(self.app.id)  # pays the full 20,000
+        with self.assertRaises(ledger.EscrowShortfall):
+            ledger.credit(self.facility, '1', 'REFUND', 'k-extra-refund', shift=self.shift)
+        self.assertEqual(ledger.shift_escrow(self.shift.pk), Decimal('0.00'))
 
     def test_not_paid_before_clock_out(self):
         self.app.clock_out_time = None
@@ -740,6 +768,8 @@ class PlatformCoverTests(TestCase):
             facility=self.facility.facility, role='Nurse', specialty='ICU', quantity_needed=1,
             start_time=past, end_time=past + timedelta(hours=8), rate=Decimal('2500'), status='COMPLETED',
         )
+        Transaction.objects.create(user=self.facility, amount=Decimal('20000'), transaction_type='CHARGE',
+                                   direction='DEBIT', reference='c2', status='SUCCESS', shift=done)
         self.pro = make_professional('0')
         ShiftApplication.objects.create(shift=done, professional=self.pro.professional,
                                         status='COMPLETED', clock_out_time=timezone.now())
@@ -811,6 +841,17 @@ class ShiftMoneyFlowTests(TestCase):
 
         self.assertEqual(balance_of(self.facility), Decimal('100000.00'))
         self.assertEqual(Transaction.objects.filter(transaction_type='REFUND').count(), 1)
+
+    def test_expiry_of_a_never_charged_shift_refunds_nothing(self):
+        from shifts.tasks import close_expired_shifts
+        start = timezone.now() - timedelta(hours=10)
+        unfunded = Shift.objects.create(  # e.g. seeded data: no CHARGE ever made
+            facility=self.facility.facility, role='Nurse', specialty='ICU', quantity_needed=3,
+            start_time=start, end_time=start + timedelta(hours=8), rate=Decimal('2500'),
+        )
+        close_expired_shifts()
+        self.assertEqual(Shift.objects.get(pk=unfunded.pk).status, 'COMPLETED')
+        self.assertEqual(balance_of(self.facility), Decimal('100000.00'))
 
     def test_removing_a_professional_twice_refunds_once(self):
         from shifts.cancellation_services import FacilityCancelShiftService
@@ -1014,3 +1055,166 @@ class ReverifyCardPaymentsTests(TestCase):
 
         self.assertEqual(balance_of(facility), Decimal('100000.00'))
         self.assertEqual(Transaction.objects.get(reference='ref-wrongly-failed').status, 'SUCCESS')
+
+
+# -- every naira accounted for -----------------------------------------------------
+
+@override_settings(**EMBEDLY_TEST_SETTINGS, PAYSTACK_SECRET_KEY='sk_test_x')
+class MoneyAuditTests(TestCase):
+    def statement(self, user):
+        from .accounting import statements
+        return next(s for s in statements() if s.user_id == user.pk)
+
+    def fund_by_paystack(self, user, amount, ref):
+        Transaction.objects.create(user=user, amount=Decimal(amount), transaction_type='FUNDING',
+                                   reference=ref, status='PENDING')
+        kobo = int(Decimal(amount) * 100)
+        with mock.patch('billing.wallet_service.requests.get', return_value=paystack_verify(amount=kobo, requested=kobo)):
+            WalletFundingVerifyService()(ref)
+
+    def test_paid_in_money_is_backed_and_clean(self):
+        facility = make_facility('0')
+        self.fund_by_paystack(facility, '100000', 'ref-clean')
+        ledger.debit(facility, '30000', 'CHARGE', 'k-audit-charge')
+        st = self.statement(facility)
+        self.assertEqual((st.balance, st.ledger_sum, st.untracked, st.over), (Decimal('70000.00'),) * 2 + (0, 0))
+
+    def test_new_accounts_cannot_start_with_money(self):
+        user = User.objects.create_user(email='rich@test.ng', password='x')
+        with self.assertRaises(ValueError):
+            Facility.objects.create(user=user, name='X', address='Y', rc_number='RC-RICH', wallet_balance=Decimal('1000'))
+
+    def test_balance_edited_outside_the_ledger_is_untracked_and_written_off(self):
+        from .accounting import write_off
+        facility = make_facility('0')
+        self.fund_by_paystack(facility, '50000', 'ref-real')
+        Facility.objects.filter(user=facility).update(wallet_balance=Decimal('2000000'))  # a direct edit
+
+        st = self.statement(facility)
+        self.assertEqual((st.untracked, st.entitled, st.over), (Decimal('1950000.00'), Decimal('50000.00'), Decimal('1950000.00')))
+
+        self.assertEqual(write_off(st), Decimal('1950000.00'))
+        after = self.statement(facility)
+        self.assertEqual((after.balance, after.untracked, after.over), (Decimal('50000.00'), 0, 0))
+        # The trail: the found money was recorded, then written off.
+        self.assertTrue(Transaction.objects.filter(user=facility, idempotency_key__startswith='audit-recognise:').exists())
+        self.assertTrue(Transaction.objects.filter(user=facility, idempotency_key__startswith='audit-writeoff:').exists())
+        self.assertEqual(write_off(after), 0)  # rerun: nothing left
+
+    def test_seed_money_and_unreferenced_admin_funding_are_unbacked(self):
+        facility = make_facility('0')
+        ledger.credit(facility, '500000', 'ADJUSTMENT', 'seed:x', settle=False)
+        ledger.credit(facility, '10000', 'FUNDING', 'admin-fund:no-ref', metadata={'admin': 'a@b.c'})
+        ledger.credit(facility, '20000', 'FUNDING', 'admin-fund:with-ref',
+                      metadata={'admin': 'a@b.c', 'payment_reference': 'NIP-123'})
+        st = self.statement(facility)
+        self.assertEqual((st.backed_in, st.entitled, st.over), (Decimal('20000.00'), Decimal('20000.00'), Decimal('510000.00')))
+
+    def test_missing_money_is_reported_never_auto_corrected(self):
+        from .accounting import write_off
+        facility = make_facility('0')
+        self.fund_by_paystack(facility, '50000', 'ref-missing')
+        Facility.objects.filter(user=facility).update(wallet_balance=Decimal('40000'))
+        st = self.statement(facility)
+        self.assertEqual(st.untracked, Decimal('-10000.00'))
+        with self.assertRaises(ValueError):
+            write_off(st)
+        self.assertEqual(balance_of(facility), Decimal('40000'))
+
+    def test_legacy_rows_seed_samples_ignored_real_shift_charges_counted(self):
+        facility = make_facility('0')
+        start = timezone.now() - timedelta(days=30)
+        shift = Shift.objects.create(facility=facility.facility, role='Nurse', specialty='ICU', quantity_needed=1,
+                                     quantity_filled=1, status='COMPLETED', start_time=start,
+                                     end_time=start + timedelta(hours=8), rate=Decimal('2500'))
+        Facility.objects.filter(user=facility).update(wallet_balance=Decimal('80000'))  # old system
+        Transaction.objects.create(user=facility, amount=Decimal('100000'), transaction_type='FUNDING',
+                                   reference='old-paystack', status='SUCCESS')  # pre-ledger card payment
+        Transaction.objects.create(user=facility, amount=Decimal('20000'), transaction_type='CHARGE',
+                                   reference='old-charge', status='SUCCESS', shift=shift)  # real
+        Transaction.objects.create(user=facility, amount=Decimal('42707'), transaction_type='CHARGE',
+                                   reference='seed-sample', status='SUCCESS')  # seed sample: no shift
+        st = self.statement(facility)
+        self.assertEqual((st.legacy_in, st.ledger_sum, st.untracked, st.over),
+                         (Decimal('100000.00'), Decimal('80000.00'), 0, 0))
+
+    def test_old_unrecorded_expiry_refunds_are_rebuilt_and_recorded(self):
+        from .accounting import write_off
+        facility = make_facility('0')
+        self.fund_by_paystack(facility, '100000', 'ref-expiry')
+        start = timezone.now() - timedelta(days=3)
+        shift = Shift.objects.create(facility=facility.facility, role='Nurse', specialty='ICU', quantity_needed=2,
+                                     quantity_filled=1, status='COMPLETED', start_time=start,
+                                     end_time=start + timedelta(hours=8), rate=Decimal('2500'))
+        ledger.debit(facility, '40000', 'CHARGE', 'k-old-shift', shift=shift)
+        # The old expiry job refunded the unfilled slot (20,000) without a record.
+        Facility.objects.filter(user=facility).update(wallet_balance=Decimal('80000'))
+
+        st = self.statement(facility)
+        self.assertEqual((st.inferred_refunds, st.untracked, st.over), (Decimal('20000.00'), 0, 0))
+        write_off(st)  # nothing to write off, but the refund gets recorded
+        refund = Transaction.objects.get(idempotency_key=f'legacy-expiry-refund:{shift.pk}')
+        self.assertEqual((refund.amount, refund.shift_id), (Decimal('20000.00'), shift.pk))
+        self.assertEqual(balance_of(facility), Decimal('80000.00'))
+        self.assertEqual(self.statement(facility).inferred_refunds, 0)
+
+    def test_system_shortfall_when_unbacked_money_was_spent(self):
+        from .accounting import system_position
+        facility = make_facility('0')
+        pro = make_professional('0')
+        self.fund_by_paystack(facility, '10000', 'ref-small')
+        ledger.credit(facility, '90000', 'ADJUSTMENT', 'seed:y', settle=False)  # fake money
+        ledger.debit(facility, '50000', 'CHARGE', 'k-spend')
+        ledger.credit(pro, '50000', 'PAYOUT', 'k-pay-real')  # a real payout from fake money
+        with mock.patch.object(embedly_client, 'get_wallet_by_account', return_value=ok({'availableBalance': 0})):
+            pos = system_position()
+        self.assertEqual(pos['money_in'], Decimal('10000.00'))
+        self.assertEqual(pos['owes'], Decimal('100000.00'))  # 50,000 facility + 50,000 professional
+        self.assertEqual(pos['shortfall'], Decimal('90000.00'))
+
+    def test_audit_command_dry_run_then_confirm(self):
+        from io import StringIO
+        from django.core.management import call_command
+        facility = make_facility('0')
+        Facility.objects.filter(user=facility).update(wallet_balance=Decimal('5000'))
+
+        out = StringIO()
+        with mock.patch.object(embedly_client, 'get_wallet_by_account', return_value=ok({'availableBalance': 0})):
+            call_command('audit_money', '--write-off', stdout=out)
+            self.assertIn('would write off', out.getvalue())
+            self.assertEqual(balance_of(facility), Decimal('5000'))
+            call_command('audit_money', '--write-off', '--confirm', stdout=StringIO())
+        self.assertEqual(balance_of(facility), Decimal('0.00'))
+
+    def test_seed_command_refuses_without_confirm(self):
+        from django.core.management import CommandError, call_command
+        with self.assertRaises(CommandError):
+            call_command('seed_data')
+
+
+class OverdrawnShiftAuditTests(TestCase):
+    """nurse1 on the real data: old payouts from a never-charged (seeded) shift are not real money."""
+
+    def test_payouts_beyond_a_shifts_charges_are_unbacked(self):
+        from .accounting import statements
+        facility = make_facility('0')
+        pro = make_professional('0')
+        start = timezone.now() - timedelta(days=40)
+        seeded = Shift.objects.create(facility=facility.facility, role='Day Nurse', specialty='ICU',
+                                      quantity_needed=1, quantity_filled=1, status='COMPLETED', start_time=start,
+                                      end_time=start + timedelta(hours=8), rate=Decimal('2500'))
+        real = Shift.objects.create(facility=facility.facility, role='Nurse', specialty='ICU',
+                                    quantity_needed=1, quantity_filled=1, status='COMPLETED', start_time=start,
+                                    end_time=start + timedelta(hours=8), rate=Decimal('2500'))
+        # Old system: real shift charged 20,000 and paid out 20,000; the seeded one paid 162,000 from nothing.
+        Transaction.objects.create(user=facility, amount=Decimal('20000'), transaction_type='CHARGE',
+                                   reference='l-charge', status='SUCCESS', shift=real)
+        Transaction.objects.create(user=pro, amount=Decimal('20000'), transaction_type='PAYOUT',
+                                   reference='l-pay-real', status='SUCCESS', shift=real)
+        Transaction.objects.create(user=pro, amount=Decimal('162000'), transaction_type='PAYOUT',
+                                   reference='l-pay-seeded', status='SUCCESS', shift=seeded)
+        Professional.objects.filter(user=pro).update(wallet_balance=Decimal('182000'))
+
+        st = next(s for s in statements() if s.user_id == pro.pk)
+        self.assertEqual((st.untracked, st.entitled, st.over),
+                         (Decimal('0.00'), Decimal('20000.00'), Decimal('162000.00')))

@@ -1,3 +1,5 @@
+import logging
+
 from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
@@ -6,6 +8,8 @@ from billing import ledger
 from core.utils import haversine
 from core.models import Notification
 from .models import Shift, ShiftApplication
+
+logger = logging.getLogger(__name__)
 
 
 @shared_task
@@ -122,11 +126,16 @@ def close_expired_shifts():
                 duration_hours = (shift.end_time - shift.start_time).total_seconds() / 3600
                 refund = shift.rate * Decimal(str(duration_hours)) * unfilled
                 if refund >= ledger.CENT:
-                    ledger.credit(
-                        shift.facility.user, ledger.to_money(refund), 'REFUND',
-                        f"shift-unfilled-refund:{shift.id}", shift=shift,
-                        metadata={'reason': 'unfilled_slots', 'unfilled': unfilled},
-                    )
+                    try:
+                        ledger.credit(
+                            shift.facility.user, ledger.to_money(refund), 'REFUND',
+                            f"shift-unfilled-refund:{shift.id}", shift=shift,
+                            metadata={'reason': 'unfilled_slots', 'unfilled': unfilled},
+                        )
+                    except ledger.EscrowShortfall as exc:
+                        # The shift was never (fully) charged: there is nothing
+                        # real to refund. Complete it anyway so this doesn't repeat.
+                        logger.warning("No unfilled-slot refund for shift %s: %s", shift.id, exc)
 
             # Reject remaining PENDING applications
             ShiftApplication.objects.filter(

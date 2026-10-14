@@ -28,6 +28,11 @@ from billing.models import AdminWalletLog
 
 class FundFacilityForm(forms.Form):
     amount = forms.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+    # Money may only enter against a payment actually received (billing.accounting).
+    payment_reference = forms.CharField(
+        max_length=120,
+        help_text="Reference of the payment received for this amount, e.g. the bank transfer session ID.",
+    )
     comment = forms.CharField(widget=forms.Textarea)
     # Issued when the form renders; a double-submit reuses it and is ignored.
     idempotency_key = forms.CharField(widget=forms.HiddenInput)
@@ -66,19 +71,23 @@ class FacilityAdmin(admin.ModelAdmin):
     fund_facility.short_description = "Fund Facility Wallet"
 
     def fund_facility_view(self, request, facility_id):
+        if not request.user.is_superuser:
+            self.message_user(request, "Only superusers can fund a facility by hand.", level=messages.ERROR)
+            return redirect('admin:accounts_facility_changelist')
         facility = Facility.objects.get(id=facility_id)
         if request.method == 'POST':
             form = FundFacilityForm(request.POST)
             if form.is_valid():
                 amount = form.cleaned_data['amount']
                 comment = form.cleaned_data['comment']
+                payment_reference = form.cleaned_data['payment_reference'].strip()
 
                 with transaction.atomic():
                     _, created = ledger.credit(
                         facility.user, amount, 'FUNDING',
                         f"admin-fund:{form.cleaned_data['idempotency_key']}",
-                        metadata={'admin': request.user.email, 'comment': comment},
-                        narration='Admin wallet funding',
+                        metadata={'admin': request.user.email, 'comment': comment,
+                                  'payment_reference': payment_reference},
                     )
                     if created:
                         AdminWalletLog.objects.create(

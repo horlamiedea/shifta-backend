@@ -162,10 +162,18 @@ def platform_cover():
     paid = Transaction.objects.filter(
         transaction_type='PAYOUT', shift=OuterRef('shift'), user=OuterRef('professional__user'),
     )
-    unpaid_work = Decimal('0')
+    # Only what each shift's escrow can actually pay: the ledger refuses payouts
+    # beyond it (never-charged seeded shifts owe nothing).
+    owed_by_shift = {}
     for app in ShiftApplication.objects.filter(status='COMPLETED').exclude(Exists(paid)).select_related('shift'):
         hours = (app.shift.end_time - app.shift.start_time).total_seconds() / 3600
-        unpaid_work += ledger.to_money(app.shift.rate * Decimal(str(hours))) if hours > 0 else Decimal('0')
+        if hours > 0:
+            owed_by_shift[app.shift_id] = owed_by_shift.get(app.shift_id, Decimal('0')) + \
+                ledger.to_money(app.shift.rate * Decimal(str(hours)))
+    unpaid_work = sum(
+        (min(owed, max(ledger.shift_escrow(shift_id), Decimal('0'))) for shift_id, owed in owed_by_shift.items()),
+        Decimal('0'),
+    )
 
     pending_to_professionals = total(WalletTransfer.objects.filter(
         status__in=WalletTransfer.OPEN_STATUSES, source_user__isnull=True, destination_user__isnull=False,

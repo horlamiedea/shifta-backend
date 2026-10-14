@@ -47,6 +47,53 @@ class IdempotencyConflict(LedgerError):
     """The key was already used for a different movement."""
 
 
+class EscrowShortfall(LedgerError, ValueError):
+    """A refund or payout larger than what the shift's escrow actually holds."""
+
+
+# Money a shift's escrow pays out; it can only pay what CHARGE entries put in.
+ESCROW_OUTFLOWS = ('REFUND', 'PAYOUT')
+
+
+def applied_entries():
+    """
+    Transactions that changed a balance (also used by billing.accounting).
+
+    Ledger entries always carry balance_after. Rows from before the ledger
+    (no key) are trusted only where the old code really moved money:
+      FUNDING that succeeded; WITHDRAWAL unless it failed (the old code
+      restored the balance on failure); CHARGE/REFUND/PAYOUT tied to a shift.
+    Shift-less charges and payouts are seed samples (core seed_data), which
+    never changed a balance; so are rows tagged metadata.sample.
+    """
+    from django.db.models import Q
+
+    done = ('SUCCESS', 'COMPLETED')
+    legacy = Q(idempotency_key__isnull=True, balance_after__isnull=True) & (
+        Q(transaction_type='FUNDING', status__in=done)
+        | (Q(transaction_type='WITHDRAWAL') & ~Q(status='FAILED'))
+        | Q(transaction_type__in=('CHARGE', 'REFUND', 'PAYOUT'), shift__isnull=False, status__in=done)
+        | Q(transaction_type__in=('REVERSAL', 'ADJUSTMENT'), status__in=done)
+    )
+    # contains, not metadata__sample=True: SQL's NOT over a missing JSON key is
+    # NULL, which would silently exclude every untagged row.
+    return Transaction.objects.filter(Q(balance_after__isnull=False) | legacy).exclude(
+        metadata__contains={'sample': True},
+    )
+
+
+def shift_escrow(shift_id):
+    """What a shift's escrow still holds: charges in, minus refunds and payouts out."""
+    from django.db.models import Sum
+
+    entries = applied_entries().filter(shift_id=shift_id)
+
+    def total(types):
+        return entries.filter(transaction_type__in=types).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+
+    return total(('CHARGE',)) - total(ESCROW_OUTFLOWS)
+
+
 def to_money(value):
     """Parse an amount into a positive Decimal with two decimal places."""
     try:
@@ -104,6 +151,14 @@ def post(user, amount, direction, transaction_type, idempotency_key, *,
         raise LedgerError("An idempotency key is required.")
     amount = to_money(amount)
 
+    # Escrow can only pay out what was charged into it. Lock the shift first
+    # (always shift before wallet, matching the shift services) so two payouts
+    # on one shift can't both pass the check.
+    pays_from_escrow = shift is not None and transaction_type in ESCROW_OUTFLOWS and direction == Transaction.CREDIT
+    if pays_from_escrow:
+        from shifts.models import Shift
+        Shift.objects.select_for_update().filter(pk=shift.pk).first()
+
     owner = lock_wallet_owner(user)
 
     # Checked after taking the lock: every posting for this wallet holds the
@@ -115,6 +170,14 @@ def post(user, amount, direction, transaction_type, idempotency_key, *,
                 f"Idempotency key {idempotency_key!r} was used for a different movement."
             )
         return existing, False
+
+    if pays_from_escrow:
+        available = shift_escrow(shift.pk)
+        if amount > available:
+            raise EscrowShortfall(
+                f"This shift's escrow holds ₦{max(available, Decimal('0')):,.2f}, "
+                f"not the ₦{amount:,.2f} requested. No money was moved."
+            )
 
     if direction == Transaction.DEBIT:
         if owner.wallet_balance < amount:
