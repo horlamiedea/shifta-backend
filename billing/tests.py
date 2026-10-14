@@ -976,6 +976,22 @@ class PaystackFundingVerifyTests(TestCase):
                     self.verify(response)
                 self.assertEqual(balance_of(self.facility), Decimal('0.00'))
 
+    def test_abandoned_checkout_is_marked_failed_and_stays_failed(self):
+        with self.assertRaisesMessage(ValueError, "wasn't completed on Paystack"):
+            self.verify(paystack_verify(status='abandoned'))
+        # The status change survives the error (it used to be rolled back).
+        self.assertEqual(Transaction.objects.get(pk=self.tx.pk).status, 'FAILED')
+
+    def test_payment_still_in_progress_stays_pending(self):
+        with self.assertRaisesMessage(ValueError, "hasn't confirmed this payment yet"):
+            self.verify(paystack_verify(status='ongoing'))
+        self.assertEqual(Transaction.objects.get(pk=self.tx.pk).status, 'PENDING')
+
+    def test_a_failed_payment_can_still_be_verified_later(self):
+        Transaction.objects.filter(pk=self.tx.pk).update(status='FAILED')  # e.g. the fee bug
+        self.assertEqual(self.verify(paystack_verify())['status'], 'success')
+        self.assertEqual(balance_of(self.facility), Decimal('100000.00'))
+
     def test_another_facility_cannot_verify_this_payment(self):
         with self.assertRaises(ValueError):
             self.verify(paystack_verify(), user=make_facility('0'))

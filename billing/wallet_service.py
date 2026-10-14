@@ -327,37 +327,64 @@ class WalletFundingService(BaseService):
 
 class WalletFundingVerifyService(BaseService):
     """
-    Verify a Paystack payment and credit the facility wallet.
+    Verify a Paystack payment and credit the facility's balance.
 
-    Paystack settles to Shifta's bank account, so the Embedly side of this
-    credit is a platform -> facility transfer; keep the platform wallet topped
-    up from Paystack settlements.
+    Safe to call any number of times (the Paystack redirect, the webhook, the
+    "Verify payment" button, the reverify_card_payments command): a payment is
+    credited at most once. Paystack settles to Shifta's bank account; top the
+    platform wallet up from those settlements (see billing.reconciliation).
     """
 
-    @transaction.atomic
+    IN_PROGRESS = ('ongoing', 'pending', 'processing', 'queued')
+
     def __call__(self, reference, user=None):
-        try:
-            tx = Transaction.objects.select_for_update().get(reference=reference, transaction_type='FUNDING')
-        except Transaction.DoesNotExist:
-            raise ValueError("Transaction not found.")
-        if user is not None and tx.user_id != user.pk:
-            raise ValueError("Transaction not found.")
+        # The status change must be committed even when verification fails, so
+        # the error is raised only after the transaction below has finished.
+        result, error = self._verify(reference, user)
+        if error:
+            raise ValueError(error)
+        return result
+
+    @transaction.atomic
+    def _verify(self, reference, user):
+        tx = (
+            Transaction.objects.select_for_update()
+            .filter(reference=reference, transaction_type='FUNDING').first()
+        )
+        if tx is None or (user is not None and tx.user_id != user.pk):
+            return None, "Transaction not found."
 
         if tx.status == 'SUCCESS':
-            return {'status': 'already_verified', 'message': 'Payment already processed.'}
-
-        # Verify with Paystack
-        verify_url = f'https://api.paystack.co/transaction/verify/{reference}'
-        headers = {'Authorization': f'Bearer {settings.PAYSTACK_SECRET_KEY}'}
+            return {'status': 'already_verified', 'message': 'Payment already processed.'}, None
 
         try:
-            response = requests.get(verify_url, headers=headers, timeout=30)
+            response = requests.get(
+                f'https://api.paystack.co/transaction/verify/{reference}',
+                headers={'Authorization': f'Bearer {settings.PAYSTACK_SECRET_KEY}'},
+                timeout=30,
+            )
             data = response.json()
         except (requests.exceptions.RequestException, ValueError):
-            raise ValueError("Could not verify payment. Please try again.")
+            return None, "Could not reach Paystack to verify the payment. Please try again."
 
         payment = data.get('data') or {}
-        paid = data.get('status') and payment.get('status') == 'success'
+        state = str(payment.get('status') or '').lower()
+
+        def failed(message):
+            tx.status = 'FAILED'
+            tx.save(update_fields=['status', 'updated_at'])
+            return None, message
+
+        if not data.get('status'):
+            return failed("Paystack has no record of this payment. Start a new funding if you still want to add money.")
+        if state in self.IN_PROGRESS:
+            # e.g. a bank transfer still on its way: not a failure, check again later.
+            return None, "Paystack hasn't confirmed this payment yet. Try again in a few minutes."
+        if state == 'abandoned':
+            return failed("This payment wasn't completed on Paystack. Start a new funding if you still want to add money.")
+        if state != 'success':
+            return failed(f"Paystack reports this payment as {state or 'failed'}.")
+
         # Paystack may add its fee on top (amount = requested_amount + fees), so
         # match what we asked for and require at least that much was charged.
         # Verified on a live test payment: requested 100000.00, charged 101624.37.
@@ -365,19 +392,15 @@ class WalletFundingVerifyService(BaseService):
         charged_kobo = payment.get('amount')
         expected_kobo = int(tx.amount * 100)
         if (
-            not paid
-            or payment.get('currency', 'NGN') != 'NGN'
+            payment.get('currency', 'NGN') != 'NGN'
             or requested_kobo is None or int(requested_kobo) != expected_kobo
             or charged_kobo is None or int(charged_kobo) < expected_kobo
         ):
-            tx.status = 'FAILED'
-            tx.save(update_fields=['status', 'updated_at'])
-            raise ValueError("Payment verification failed.")
+            return failed(f"The amount paid doesn't match this funding. Contact support with reference {tx.reference}.")
 
         tx, _ = ledger.credit(
             tx.user, tx.amount, 'FUNDING', f"paystack:{reference}",
-            pending=tx, narration='Card funding (Paystack)',
-            metadata={'channel': 'paystack'},
+            pending=tx, metadata={'channel': 'paystack', 'paystack_channel': payment.get('channel')},
         )
         facility = tx.user.facility
         facility.refresh_from_db(fields=['wallet_balance'])
@@ -387,7 +410,7 @@ class WalletFundingVerifyService(BaseService):
             'message': 'Wallet funded successfully.',
             'amount': str(tx.amount),
             'new_balance': str(facility.wallet_balance),
-        }
+        }, None
 
 
 class WalletWithdrawalService(BaseService):
